@@ -46,6 +46,12 @@ typedef struct {
     board_placement_t placement;
     bool rotation_valid;
     unsigned rotation_degrees;
+    bool magnetic_initialized;
+    bool magnetic_ack;
+    uint8_t magnetic_product_id;
+    uint8_t magnetic_status;
+    esp_err_t magnetic_init_result;
+    esp_err_t magnetic_read_result;
     bool magnetic_valid;
     int64_t magnetic_us;
     float magnetic_gauss[3];

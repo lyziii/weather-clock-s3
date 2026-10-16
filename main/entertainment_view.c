@@ -21,6 +21,11 @@ static lv_obj_t *magnetic_state;
 static lv_obj_t *magnetic_values[3];
 static lv_obj_t *magnetic_strength;
 static lv_obj_t *magnetic_age;
+static lv_obj_t *compass_dial;
+static lv_obj_t *compass_heading_label;
+static lv_obj_t *magnetic_diagnostic;
+static float compass_heading;
+static bool compass_valid;
 static lv_obj_t *gps_state;
 static lv_obj_t *gps_satellites;
 static lv_obj_t *gps_latitude;
@@ -143,9 +148,80 @@ static void set_enabled(lv_obj_t *object, bool enabled)
     else { lv_obj_add_state(object, LV_STATE_DISABLED); }
 }
 
-/* 磁场强度不是已校准航向；无效数据不显示默认零值。 */
-static void refresh_sensors(void)
+/* 指针表示磁北相对屏幕上沿的位置；无有效航向时不绘制指北针。 */
+static void draw_compass(lv_event_t *event)
 {
+    lv_area_t area;
+    lv_obj_get_coords(lv_event_get_target_obj(event), &area);
+    lv_layer_t *layer = lv_event_get_layer(event);
+    float center_x = (area.x1 + area.x2) * 0.5f;
+    float center_y = (area.y1 + area.y2) * 0.5f;
+    lv_draw_line_dsc_t line;
+    lv_draw_line_dsc_init(&line);
+    line.width = 1;
+    for (unsigned tick = 0; tick < 24; ++tick) {
+        float angle = tick * (6.2831853f / 24);
+        float inner_radius = tick % 6 == 0 ? 63 : 69;
+        line.color = lv_color_hex(tick % 6 == 0 ? 0x8CE2BE : 0x526B61);
+        line.p1 = (lv_point_precise_t){center_x + sinf(angle) * inner_radius,
+                                     center_y - cosf(angle) * inner_radius};
+        line.p2 = (lv_point_precise_t){center_x + sinf(angle) * 74,
+                                     center_y - cosf(angle) * 74};
+        lv_draw_line(layer, &line);
+    }
+    if (!compass_valid) { return; }
+    float angle = -compass_heading * (3.14159265f / 180.0f);
+    float north_x = sinf(angle);
+    float north_y = -cosf(angle);
+    lv_draw_triangle_dsc_t triangle;
+    lv_draw_triangle_dsc_init(&triangle);
+    triangle.opa = LV_OPA_COVER;
+    triangle.color = lv_color_hex(0xF37870);
+    triangle.p[0] = (lv_point_precise_t){center_x + north_x * 43, center_y + north_y * 43};
+    triangle.p[1] = (lv_point_precise_t){center_x - north_y * 7, center_y + north_x * 7};
+    triangle.p[2] = (lv_point_precise_t){center_x + north_y * 7, center_y - north_x * 7};
+    lv_draw_triangle(layer, &triangle);
+    triangle.color = lv_color_hex(0xDDE7E5);
+    triangle.p[0] = (lv_point_precise_t){center_x - north_x * 37, center_y - north_y * 37};
+    lv_draw_triangle(layer, &triangle);
+}
+
+/* 航向只用模块水平两轴，不宣称真北、倾斜补偿或硬铁校准。 */
+static void update_compass(const board_hardware_snapshot_t *hardware, bool valid)
+{
+    float forward = hardware->magnetic_gauss[HW_MAG_FORWARD_AXIS] * HW_MAG_FORWARD_SIGN;
+    float right = hardware->magnetic_gauss[HW_MAG_RIGHT_AXIS] * HW_MAG_RIGHT_SIGN;
+    float total_squared = 0;
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        total_squared += hardware->magnetic_gauss[axis] * hardware->magnetic_gauss[axis];
+    }
+    valid = valid && isfinite(forward) && isfinite(right) &&
+            forward * forward + right * right > 0.000025f && total_squared < 1.44f;
+    if (valid) {
+        float heading = atan2f(-right, forward) * (180.0f / 3.14159265f);
+        if (heading < 0) { heading += 360; }
+        if (compass_valid) {
+            /* 沿最短圆弧平滑，跨越 359/0 度时不让指针绕行一整圈。 */
+            float delta = fmodf(heading - compass_heading + 540, 360) - 180;
+            compass_heading = fmodf(compass_heading + delta * 0.4f + 360, 360);
+        } else { compass_heading = heading; }
+        const char *directions[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+        unsigned degrees = (unsigned)lroundf(compass_heading) % 360;
+        unsigned direction = (unsigned)((compass_heading + 22.5f) / 45) % 8;
+        lv_label_set_text_fmt(compass_heading_label, "%03u deg %s", degrees, directions[direction]);
+    } else {
+        lv_label_set_text(compass_heading_label, "-- deg");
+        if (hardware->magnetic_valid && total_squared >= 1.44f) {
+            lv_label_set_text(magnetic_state, "MAGNETIC DISTURBANCE");
+        }
+    }
+    compass_valid = valid;
+    lv_obj_invalidate(compass_dial);
+}
+
+static void refresh_sensors(lv_timer_t *timer)
+{
+    (void)timer;
     if (!lv_obj_is_visible(magnetometer) && !lv_obj_is_visible(gps)) { return; }
     board_hardware_snapshot_t hardware = {0};
     bool ready = board_hardware_snapshot(&hardware);
@@ -153,7 +229,9 @@ static void refresh_sensors(void)
     if (lv_obj_is_visible(magnetometer)) {
         bool valid = ready && hardware.magnetic_valid;
         lv_label_set_text(magnetic_state, !HW_MMC5983_ENABLED ? "DISABLED" :
-            !ready ? "BUSY" : valid ? "LIVE" : "NO DATA / STALE");
+            !ready ? "BUSY" : !hardware.magnetic_ack ? "NO ACK AT 0x30" :
+            !hardware.magnetic_initialized ? "INITIALIZATION FAILED" :
+            valid ? "MAGNETIC | 2D / UNCAL" : "NO DATA / STALE");
         float strength_squared = 0;
         for (unsigned axis = 0; axis < 3; ++axis) {
             if (valid) {
@@ -166,6 +244,10 @@ static void refresh_sensors(void)
         if (ready && hardware.magnetic_us) {
             lv_label_set_text_fmt(magnetic_age, "AGE %lld ms", (long long)((now - hardware.magnetic_us) / 1000));
         } else { lv_label_set_text(magnetic_age, "AGE --"); }
+        lv_label_set_text_fmt(magnetic_diagnostic, "0x%02X ID %02X STATUS %02X\n%s | %s",
+            HW_MMC5983_ADDRESS, hardware.magnetic_product_id, hardware.magnetic_status,
+            esp_err_to_name(hardware.magnetic_init_result), esp_err_to_name(hardware.magnetic_read_result));
+        update_compass(&hardware, valid);
     }
     if (lv_obj_is_visible(gps)) {
         bool valid = ready && hardware.gnss_valid;
@@ -194,7 +276,6 @@ static void refresh_sensors(void)
 static void refresh(lv_timer_t *timer)
 {
     (void)timer;
-    refresh_sensors();
     if (!tf_card_snapshot(&incoming) || incoming.revision == rendered_revision) { return; }
     snapshot = incoming;
     rendered_revision = snapshot.revision;
@@ -303,16 +384,36 @@ lv_obj_t *entertainment_view_create(void)
     imu_view_create_in(lv_obj_get_display(screen), gyroscope);
     imu_view_layout(240, 320);
     magnetometer = content();
-    magnetic_state = make_label(magnetometer, "WAITING", 14, 8, 212, &lv_font_montserrat_12, 0x8CE2BE);
-    make_label(magnetometer, "MMC5983MA | 0x30", 14, 34, 212, &lv_font_montserrat_12, 0x8CA49B);
+    enable_vertical_scroll(magnetometer);
+    magnetic_state = make_label(magnetometer, "WAITING", 14, 4, 212, &lv_font_montserrat_12, 0x8CE2BE);
+    compass_dial = make_shape(magnetometer, 42, 24, 156, 156, 0x14231E, LV_RADIUS_CIRCLE);
+    lv_obj_set_style_border_width(compass_dial, 1, 0);
+    lv_obj_set_style_border_color(compass_dial, lv_color_hex(0x3B504A), 0);
+    lv_obj_set_scrollable(compass_dial, false);
+    lv_obj_set_clickable(compass_dial, false);
+    lv_obj_add_event_cb(compass_dial, draw_compass, LV_EVENT_DRAW_MAIN, NULL);
+    const char *cardinals[] = {"N", "E", "S", "W"};
+    const int cardinal_x[] = {66, 122, 66, 10};
+    const int cardinal_y[] = {10, 70, 130, 70};
+    for (unsigned index = 0; index < 4; ++index) {
+        lv_obj_t *label = make_label(compass_dial, cardinals[index], cardinal_x[index], cardinal_y[index],
+                                     24, &lv_font_montserrat_12, index ? 0xC1CBC9 : 0xF37870);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    }
+    lv_obj_t *hub = make_shape(compass_dial, 74, 74, 8, 8, 0x8CE2BE, LV_RADIUS_CIRCLE);
+    lv_obj_set_clickable(hub, false);
+    compass_heading_label = make_label(magnetometer, "-- deg", 14, 184, 212,
+                                        &lv_font_montserrat_28, 0xFFFFFF);
+    lv_obj_set_style_text_align(compass_heading_label, LV_TEXT_ALIGN_CENTER, 0);
     const char *axes[] = {"X", "Y", "Z"};
     for (unsigned axis = 0; axis < 3; ++axis) {
-        make_label(magnetometer, axes[axis], 14, 68 + axis * 32, 24, &lv_font_montserrat_12, 0x8CE2BE);
-        magnetic_values[axis] = make_label(magnetometer, "-- G", 50, 68 + axis * 32, 176,
+        make_label(magnetometer, axes[axis], 14, 254 + axis * 24, 24, &lv_font_montserrat_12, 0x8CE2BE);
+        magnetic_values[axis] = make_label(magnetometer, "-- G", 50, 254 + axis * 24, 176,
                                            &lv_font_montserrat_12, 0xFFFFFF);
     }
-    magnetic_strength = make_label(magnetometer, "Field -- G", 14, 174, 212, &lv_font_montserrat_12, 0xFFFFFF);
-    magnetic_age = make_label(magnetometer, "AGE --", 14, 208, 212, &lv_font_montserrat_12, 0x8CA49B);
+    magnetic_strength = make_label(magnetometer, "Field -- G", 14, 222, 212, &lv_font_montserrat_12, 0xFFFFFF);
+    magnetic_age = make_label(magnetometer, "AGE --", 14, 330, 212, &lv_font_montserrat_12, 0x8CA49B);
+    magnetic_diagnostic = make_label(magnetometer, "MMC5983MA", 14, 354, 212, &lv_font_montserrat_12, 0x8CA49B);
     gps = content();
     gps_state = make_label(gps, "WAITING / NO FIX", 14, 8, 212, &lv_font_montserrat_12, 0x8CE2BE);
     gps_satellites = make_label(gps, "Satellites --", 14, 38, 212, &lv_font_montserrat_12, 0xFFFFFF);
@@ -340,6 +441,7 @@ lv_obj_t *entertainment_view_create(void)
         lv_obj_set_height(sensor_pages[index], 244);
     }
     entertainment_view_home();
+    lv_timer_create(refresh_sensors, 100, NULL);
     lv_timer_create(refresh, 500, NULL);
     return screen;
 }

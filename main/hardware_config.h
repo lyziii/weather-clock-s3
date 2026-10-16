@@ -18,6 +18,17 @@
 /* MPU 地址沿用旧板实测结果；新板接线后仍须确认模块地址跳线。 */
 #define HW_MPU6050_ADDRESS 0x68
 #define HW_MMC5983_ADDRESS 0x30
+/* 地磁模块安装方向：默认 +Y 朝设备上沿、+X 朝右，转向以实机核对为准。 */
+#define HW_MAG_FORWARD_AXIS 1
+#define HW_MAG_RIGHT_AXIS 0
+#define HW_MAG_FORWARD_SIGN 1
+#define HW_MAG_RIGHT_SIGN 1
+#if HW_MAG_FORWARD_AXIS < 0 || HW_MAG_FORWARD_AXIS > 2 || HW_MAG_RIGHT_AXIS < 0 || HW_MAG_RIGHT_AXIS > 2 || HW_MAG_FORWARD_AXIS == HW_MAG_RIGHT_AXIS
+#error "Invalid magnetometer heading axes"
+#endif
+#if (HW_MAG_FORWARD_SIGN != 1 && HW_MAG_FORWARD_SIGN != -1) || (HW_MAG_RIGHT_SIGN != 1 && HW_MAG_RIGHT_SIGN != -1)
+#error "Invalid magnetometer heading signs"
+#endif
 #define HW_TOUCH_ADDRESS 0x38
 #define HW_AUDIO_ADDRESS 0x18
 

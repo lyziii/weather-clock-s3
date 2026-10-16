@@ -410,6 +410,18 @@ esp_err_t weather_clock_init(void)
 bool weather_clock_command(const char *command)
 {
     if (strcmp(command, "sound test") == 0) { return touch_sound_test(); }
+    if (strcmp(command, "mag status") == 0) {
+        board_hardware_snapshot_t hardware = {0};
+        bool ready = board_hardware_snapshot(&hardware);
+        printf("MAG snapshot=%d addr=0x%02X ACK=%d ID=0x%02X init=%s ready=%d read=%s status=0x%02X valid=%d XYZ=%+.4f,%+.4f,%+.4f age_ms=%lld\n",
+               ready, HW_MMC5983_ADDRESS, hardware.magnetic_ack, hardware.magnetic_product_id,
+               esp_err_to_name(hardware.magnetic_init_result), hardware.magnetic_initialized,
+               esp_err_to_name(hardware.magnetic_read_result), hardware.magnetic_status,
+               hardware.magnetic_valid, hardware.magnetic_gauss[0], hardware.magnetic_gauss[1],
+               hardware.magnetic_gauss[2], hardware.magnetic_us ?
+               (long long)((esp_timer_get_time() - hardware.magnetic_us) / 1000) : -1LL);
+        return true;
+    }
     if (!state_mutex || xSemaphoreTake(state_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
         return false;
     }

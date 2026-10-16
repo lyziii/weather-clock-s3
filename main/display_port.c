@@ -228,10 +228,10 @@ esp_err_t display_port_init(lv_display_t **output, void (*create_pages)(lv_displ
     if (result != ESP_OK) { goto cleanup; }
     port_ready = true;
     ESP_LOGI(TAG, "LCD stage: LVGL port ready; adding display (hardware rotation)");
-    /* 单份 240x24 RGB565 DMA 缓冲，硬件转屏不额外分配旋转缓冲。 */
+    /* 双份 DMA 缓冲交替绘制与发送，减少整屏切页时等待 SPI 传输的空档。 */
     lvgl_port_display_cfg_t display_config = {
         .io_handle = io, .panel_handle = panel,
-        .buffer_size = LCD_WIDTH * DRAW_LINES, .double_buffer = false,
+        .buffer_size = LCD_WIDTH * DRAW_LINES, .double_buffer = true,
         .hres = LCD_WIDTH, .vres = LCD_HEIGHT, .color_format = LV_COLOR_FORMAT_RGB565,
         .rotation = {
             .swap_xy = LCD_SWAP_XY, .mirror_x = LCD_MIRROR_X, .mirror_y = LCD_MIRROR_Y,

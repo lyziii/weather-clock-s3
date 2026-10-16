@@ -25,6 +25,7 @@ static bool gnss_uart_installed;
 static esp_err_t initialization_result = ESP_ERR_INVALID_STATE;
 static bool imu_probe_done;
 static uint8_t imu_ack_mask;
+static esp_err_t initialize_magnetometer(board_hardware_snapshot_t *sample);
 
 static esp_err_t magnetic_read(uint8_t reg, void *data, size_t size)
 {
@@ -42,12 +43,15 @@ static void sample_magnetic(board_hardware_snapshot_t *sample)
 {
     uint8_t status;
     uint8_t raw[7];
-    if (magnetic_read(0x08, &status, 1) != ESP_OK) {
+    sample->magnetic_read_result = magnetic_read(0x08, &status, 1);
+    if (sample->magnetic_read_result != ESP_OK) {
         sample->magnetic_valid = false;
         return;
     }
+    sample->magnetic_status = status;
     if (status & 0x01) {
-        if (magnetic_read(0x00, raw, sizeof(raw)) == ESP_OK) {
+        sample->magnetic_read_result = magnetic_read(0x00, raw, sizeof(raw));
+        if (sample->magnetic_read_result == ESP_OK) {
             uint32_t axes[] = {
                 ((uint32_t)raw[0] << 10) | ((uint32_t)raw[1] << 2) | (raw[6] >> 6),
                 ((uint32_t)raw[2] << 10) | ((uint32_t)raw[3] << 2) | ((raw[6] >> 4) & 3),
@@ -61,7 +65,11 @@ static void sample_magnetic(board_hardware_snapshot_t *sample)
         } else { sample->magnetic_valid = false; }
     }
     /* 自动 SET/RESET 后触发单次测量，下个采样周期再检查完成位。 */
-    if (magnetic_write(0x09, 0x21) != ESP_OK) { sample->magnetic_valid = false; }
+    esp_err_t trigger_result = magnetic_write(0x09, 0x21);
+    if (trigger_result != ESP_OK) {
+        sample->magnetic_read_result = trigger_result;
+        sample->magnetic_valid = false;
+    }
 }
 
 static void recognize_placement(board_hardware_snapshot_t *sample)
@@ -312,7 +320,8 @@ static void sample_gnss(board_hardware_snapshot_t *sample)
 
 static void hardware_task(void *argument)
 {
-    board_hardware_snapshot_t sample = {0};
+    board_hardware_snapshot_t sample = latest;
+    int64_t next_magnetic_retry = esp_timer_get_time() + 5000000;
     for (;;) {
         if (imu) {
             mpu6050_accel_data_axes_t acceleration;
@@ -337,6 +346,12 @@ static void hardware_task(void *argument)
             update_ride_motion(&sample);
             recognize_placement(&sample);
         }
+        /* 允许开机后接入器件；失败重试只创建地磁设备，不重建触摸共用总线。 */
+        if (HW_MMC5983_ENABLED && !magnetometer && i2c_bus &&
+            esp_timer_get_time() >= next_magnetic_retry) {
+            initialize_magnetometer(&sample);
+            next_magnetic_retry = esp_timer_get_time() + 5000000;
+        }
         if (magnetometer) { sample_magnetic(&sample); }
         if (gnss_uart_installed) { sample_gnss(&sample); }
         if (xSemaphoreTake(snapshot_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
@@ -358,17 +373,25 @@ static bool pin_reserved(int pin)
 }
 
 /* 可选地磁计初始化失败时只释放自身设备，保留触摸共用的 I2C。 */
-static esp_err_t initialize_magnetometer(void)
+static esp_err_t initialize_magnetometer(board_hardware_snapshot_t *sample)
 {
+    sample->magnetic_initialized = false;
+    sample->magnetic_valid = false;
+    sample->magnetic_product_id = 0;
+    sample->magnetic_read_result = ESP_ERR_INVALID_STATE;
+    esp_err_t result = i2c_master_probe(i2c_bus, HW_MMC5983_ADDRESS, 30);
+    sample->magnetic_ack = result == ESP_OK;
+    if (result != ESP_OK) { sample->magnetic_init_result = result; return result; }
     i2c_device_config_t config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = HW_MMC5983_ADDRESS,
         .scl_speed_hz = HW_I2C_HZ,
     };
-    esp_err_t result = i2c_master_bus_add_device(i2c_bus, &config, &magnetometer);
-    if (result != ESP_OK) { return result; }
+    result = i2c_master_bus_add_device(i2c_bus, &config, &magnetometer);
+    if (result != ESP_OK) { sample->magnetic_init_result = result; return result; }
     uint8_t product_id = 0;
     result = magnetic_read(0x2F, &product_id, 1);
+    sample->magnetic_product_id = product_id;
     if (result == ESP_OK && product_id != 0x30) { result = ESP_ERR_NOT_FOUND; }
     if (result == ESP_OK) { result = magnetic_write(0x0A, 0x00); }
     if (result == ESP_OK) { result = magnetic_write(0x0B, 0x00); }
@@ -377,6 +400,10 @@ static esp_err_t initialize_magnetometer(void)
         i2c_master_bus_rm_device(magnetometer);
         magnetometer = NULL;
     }
+    sample->magnetic_initialized = result == ESP_OK;
+    sample->magnetic_init_result = result;
+    ESP_LOGI("board_hardware", "MAG addr=0x%02X ID=0x%02X init=%s",
+             HW_MMC5983_ADDRESS, product_id, esp_err_to_name(result));
     return result;
 }
 
@@ -461,7 +488,7 @@ static esp_err_t initialize_hardware(void)
         }
     }
     if (HW_MMC5983_ENABLED) {
-        result = initialize_magnetometer();
+        result = initialize_magnetometer(&latest);
         if (result != ESP_OK) {
             ESP_LOGW("board_hardware", "MMC5983MA unavailable: %s", esp_err_to_name(result));
         }
@@ -485,7 +512,7 @@ static esp_err_t initialize_hardware(void)
             ESP_LOGW("board_hardware", "GNSS UART unavailable: %s", esp_err_to_name(result));
         }
     }
-    if ((imu || magnetometer || gnss_uart_installed) &&
+    if ((imu || magnetometer || gnss_uart_installed || (HW_MMC5983_ENABLED && i2c_bus)) &&
         xTaskCreate(hardware_task, "hardware", 4096, NULL, 2, NULL) != pdPASS) {
         result = ESP_ERR_NO_MEM;
         goto cleanup;

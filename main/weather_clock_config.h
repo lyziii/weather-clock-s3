@@ -23,9 +23,9 @@
 /* 板载背光高电平开启；45/46 的启动电平由硬件保证。 */
 #define LCD_PIN_BL   45
 #define LCD_BACKLIGHT_ON_LEVEL 1
-#define LCD_SPI_CLOCK_HZ (20 * 1000 * 1000)
+#define LCD_SPI_CLOCK_HZ (40 * 1000 * 1000)
 
-/* 用户初始化为 MADCTL=0x08、RGB565、反色开启；SPI 先用保守 20 MHz。 */
+/* RGB565 全帧在 40 MHz 下约需 31 ms；须实机核对信号完整性及花屏情况。 */
 #define LCD_OFFSET_X 0
 #define LCD_OFFSET_Y 0
 #define LCD_SWAP_XY false
