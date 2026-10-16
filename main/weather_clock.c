@@ -17,11 +17,13 @@
 #include "hardware_config.h"
 #include "ui_status_bar.h"
 #include "display_port.h"
-#include "imu_view.h"
 #include "ui_helpers.h"
 #include "weather_service.h"
 #include "touch_controls.h"
 #include "power_manager.h"
+#include "touch_sound.h"
+#include "tf_card.h"
+#include "entertainment_view.h"
 
 #define NETWORK_READY BIT0
 #define TIME_READY BIT1
@@ -49,11 +51,12 @@ static int64_t last_weather_update;
 static bool weather_failed;
 static SemaphoreHandle_t state_mutex;
 static bool ride_mode;
-static bool imu_view;
+static bool media_mode;
 static ride_model_t ride;
 static lv_obj_t *desk_screen;
 static lv_obj_t *ride_screen;
-static lv_obj_t *imu_screen;
+static lv_obj_t *media_screen;
+static lv_obj_t *boot_overlay;
 static lv_obj_t *ride_speed_label;
 static lv_obj_t *ride_avg_label;
 static lv_obj_t *ride_trip_label;
@@ -90,7 +93,63 @@ static void touch_command_task(void *argument)
 
 static lv_obj_t *selected_screen(void)
 {
-    return imu_view ? imu_screen : (ride_mode ? ride_screen : desk_screen);
+    return media_mode ? media_screen : (ride_mode ? ride_screen : desk_screen);
+}
+
+static unsigned selected_page(void)
+{
+    return media_mode ? 1 : (ride_mode ? 2 : 0);
+}
+
+static void boot_line_width(void *object, int32_t width)
+{
+    lv_obj_set_width(object, width);
+    lv_obj_align(object, LV_ALIGN_CENTER, 0, 20);
+}
+
+static void boot_logo_opacity(void *object, int32_t opacity)
+{
+    lv_obj_set_style_opa(object, opacity, 0);
+}
+
+static void boot_finished(lv_timer_t *timer)
+{
+    lv_timer_delete(timer);
+    lv_obj_delete(boot_overlay);
+    boot_overlay = NULL;
+    touch_controls_set_blocked(false);
+}
+
+/* 顶层遮罩不改变已保存的目标页；冷启动和触摸深睡唤醒共用同一动画。 */
+static void show_boot_animation(void)
+{
+    touch_controls_set_blocked(true);
+    boot_overlay = make_shape(lv_display_get_layer_top(display), 0, 0,
+                              LV_PCT(100), LV_PCT(100), 0x080F0D, 0);
+    lv_obj_set_scrollable(boot_overlay, false);
+    lv_obj_t *line = make_shape(boot_overlay, 0, 0, 2, 2, 0x8CE2BE, 0);
+    lv_obj_align(line, LV_ALIGN_CENTER, 0, 20);
+    lv_obj_t *logo = make_label(boot_overlay, "L-Vectra", 0, 0, 220,
+                                &lv_font_montserrat_28, 0xFFFFFF);
+    lv_obj_set_style_text_align(logo, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(logo, LV_ALIGN_CENTER, 0, -12);
+    lv_obj_set_style_opa(logo, LV_OPA_TRANSP, 0);
+    lv_anim_t animation;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, line);
+    lv_anim_set_exec_cb(&animation, boot_line_width);
+    lv_anim_set_values(&animation, 2, 168);
+    lv_anim_set_duration(&animation, 450);
+    lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
+    lv_anim_start(&animation);
+    lv_anim_set_var(&animation, logo);
+    lv_anim_set_exec_cb(&animation, boot_logo_opacity);
+    lv_anim_set_values(&animation, LV_OPA_TRANSP, LV_OPA_COVER);
+    lv_anim_set_delay(&animation, 450);
+    lv_anim_set_duration(&animation, 500);
+    lv_anim_start(&animation);
+    lv_timer_t *timer = lv_timer_create(boot_finished, 1800, NULL);
+    lv_timer_set_repeat_count(timer, 1);
 }
 
 /* 适配 X-TRACK Dialplate 的大速度区和四项统计布局，使用 LVGL9 原生接口。 */
@@ -100,7 +159,7 @@ static void create_ride_ui(void)
     lv_obj_set_style_bg_color(ride_screen, lv_color_hex(0x111111), 0);
     lv_obj_set_scrollable(ride_screen, false);
     make_label(ride_screen, "RIDE", 12, 8, 46, LV_FONT_DEFAULT, 0xFFB04A);
-    ride_clock_label = make_label(ride_screen, "--:--", 65, 8, 53, &lv_font_montserrat_12, 0xCCCCCC);
+    ride_clock_label = make_label(ride_screen, "--:--", 63, 8, 43, &lv_font_montserrat_12, 0xCCCCCC);
     ride_speed_band = make_shape(ride_screen, 0, 31, 240, 74, 0x333333, 0);
     ride_speed_label = make_label(ride_screen, "--", 10, 29, 220, &lv_font_montserrat_48, 0xFFFFFF);
     lv_obj_set_style_text_align(ride_speed_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -134,7 +193,7 @@ static void create_ui(void)
     desk_screen = screen;
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x101918), 0);
     lv_obj_set_scrollable(screen, false);
-    make_label(screen, WEATHER_CITY, 14, 8, 106, LV_FONT_DEFAULT, 0x8CE2BE);
+    make_label(screen, WEATHER_CITY, 14, 8, 92, LV_FONT_DEFAULT, 0x8CE2BE);
     date_label = make_label(screen, "---- -- --", 14, 40, 218, LV_FONT_DEFAULT, 0xC1CBC9);
     time_label = make_label(screen, "--:--", 10, 61, 220, &lv_font_montserrat_48, 0xFFFFFF);
     lv_obj_set_style_text_align(time_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -170,14 +229,12 @@ static void create_ui(void)
     lv_obj_set_hidden(storm_icon, true);
     ESP_LOGI(TAG, "LCD stage: weather page ready; creating ride page");
     create_ride_ui();
-    ESP_LOGI(TAG, "LCD stage: ride page ready; creating IMU page");
-    imu_screen = imu_view_create(display);
+    ESP_LOGI(TAG, "LCD stage: ride page ready; creating system page");
+    media_screen = entertainment_view_create();
     ui_status_bar_create(&status_bars[0], desk_screen, false);
     ui_status_bar_create(&status_bars[1], ride_screen, true);
-    ui_status_bar_create(&status_bars[2], imu_screen, false);
-    board_hardware_snapshot_t hardware;
-    board_hardware_snapshot(&hardware);
-    if (HW_MPU6050_ENABLED && hardware.initialization_result != ESP_OK) { imu_view = true; }
+    ui_status_bar_create(&status_bars[2], media_screen, true);
+    /* 传感器异常留在诊断页显示，不覆盖用户保存的启动标签页。 */
     ESP_LOGI(TAG, "LCD stage: pages ready; loading initial screen");
     lv_screen_load(selected_screen());
     ESP_LOGI(TAG, "LCD stage: initial screen loaded");
@@ -189,7 +246,7 @@ static void center_ui(void)
     int width = lv_display_get_horizontal_resolution(display);
     int height = lv_display_get_vertical_resolution(display);
     bool landscape = width > height;
-    lv_obj_t *screens[] = {desk_screen, ride_screen, imu_screen};
+    lv_obj_t *screens[] = {desk_screen, ride_screen, media_screen};
     for (unsigned index = 0; index < 3; ++index) {
         lv_obj_set_style_pad_all(screens[index], 0, 0);
         lv_obj_set_style_border_width(screens[index], 0, 0);
@@ -246,7 +303,6 @@ static void center_ui(void)
     }
     place_label(ride_state_label, 12, height - 76, width / 2 - 12);
     place_label(ride_sensor_label, width / 2 + 8, height - 76, width / 2 - 20);
-    imu_view_layout(width, height);
 }
 
 static void create_display_ui(lv_display_t *created_display)
@@ -255,7 +311,8 @@ static void create_display_ui(lv_display_t *created_display)
     create_ui();
     center_ui();
     touch_controls_create(display, ride_screen, submit_touch_command);
-    touch_controls_update(imu_view ? 2 : (ride_mode ? 1 : 0), ride.running);
+    touch_controls_update(selected_page(), ride.running);
+    show_boot_animation();
 }
 
 static void show_weather(const weather_data_t *weather, bool success)
@@ -316,6 +373,8 @@ esp_err_t weather_clock_init(void)
         uint8_t saved_mode = 0;
         if (nvs_get_u8(storage, "mode", &saved_mode) == ESP_OK) {
             ride_mode = saved_mode == 1;
+            /* 旧版独立 IMU 标签迁移为系统首页，不再占用一级分页。 */
+            media_mode = saved_mode == 2 || saved_mode == 3;
         }
         nvs_close(storage);
     }
@@ -329,7 +388,9 @@ esp_err_t weather_clock_init(void)
         touch_commands = NULL;
         return ESP_ERR_NO_MEM;
     }
-    esp_err_t result = display_port_init(&display, create_display_ui);
+    esp_err_t result = tf_card_init();
+    if (result != ESP_OK) { ESP_LOGW(TAG, "TF task unavailable: %s", esp_err_to_name(result)); }
+    result = display_port_init(&display, create_display_ui);
     if (result != ESP_OK) {
         ESP_LOGW(TAG, "Display init failed: %s; serial clock continues", esp_err_to_name(result));
     }
@@ -348,45 +409,51 @@ esp_err_t weather_clock_init(void)
 /* 锁顺序固定为状态锁再 LVGL 锁；NVS 只保存模式，不保存虚构的骑行数据。 */
 bool weather_clock_command(const char *command)
 {
+    if (strcmp(command, "sound test") == 0) { return touch_sound_test(); }
     if (!state_mutex || xSemaphoreTake(state_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
         return false;
     }
     int64_t now = esp_timer_get_time();
     bool handled = true;
     bool save_mode = false;
+    bool open_imu = false;
     bool enter_sleep = strcmp(command, "power sleep") == 0;
     lv_screen_load_anim_t transition = LV_SCREEN_LOAD_ANIM_NONE;
     if (enter_sleep) {
         printf("Entering touch-wake sleep. Tap the screen three times to wake.\n");
     } else if (strcmp(command, "page next") == 0 || strcmp(command, "page prev") == 0) {
-        int page = imu_view ? 2 : (ride_mode ? 1 : 0);
+        int page = selected_page();
         bool forward = strcmp(command, "page next") == 0;
         int next_page = page + (forward ? 1 : -1);
-        /* 页序固定为 Clock/Ride/IMU，首尾不循环，方向反转即可回到原页。 */
+        /* 一级页固定为 Clock/System/Ride，传感器只从系统二级菜单进入。 */
         if (next_page < 0 || next_page > 2) {
             xSemaphoreGive(state_mutex);
             return true;
         }
-        const char *commands[] = {"mode desk", "mode ride", "mode imu"};
+        const char *commands[] = {"mode desk", "mode system", "mode ride"};
         command = commands[next_page];
         transition = forward ? LV_SCREEN_LOAD_ANIM_MOVE_RIGHT : LV_SCREEN_LOAD_ANIM_MOVE_LEFT;
     }
     if (enter_sleep) {
         /* 睡眠动作在状态锁释放后执行，不能让 LVGL 回调路径持锁进入深睡。 */
-    } else if (strcmp(command, "mode desk") == 0 || strcmp(command, "mode ride") == 0) {
-        imu_view = false;
+    } else if (strcmp(command, "mode desk") == 0 || strcmp(command, "mode ride") == 0 ||
+             strcmp(command, "mode media") == 0 || strcmp(command, "mode system") == 0) {
+         media_mode = strcmp(command, "mode media") == 0 || strcmp(command, "mode system") == 0;
         bool next_ride = strcmp(command, "mode ride") == 0;
         if (!next_ride) { ride_model_pause(&ride, now); previous_gnss_us = 0; }
         ride_mode = next_ride;
         save_mode = true;
-        printf("Mode: %s\n", ride_mode ? "ride" : "desk");
+        printf("Mode: %s\n", media_mode ? "system" : (ride_mode ? "ride" : "desk"));
     } else if (strcmp(command, "mode imu") == 0) {
-        imu_view = true;
+        open_imu = true;
+        media_mode = true;
+        ride_mode = false;
+        save_mode = true;
         ride_model_pause(&ride, now);
         previous_gnss_us = 0;
         printf("MPU6050 diagnostics; ride timer paused.\n");
     } else if (strcmp(command, "ride start") == 0) {
-        if (ride_mode && !imu_view) {
+        if (ride_mode) {
             if (!ride.running) { previous_gnss_us = 0; }
             ride_model_start(&ride, now);
             printf("Ride timer started. Readings require a valid sensor fix.\n");
@@ -401,7 +468,7 @@ bool weather_clock_command(const char *command)
         printf("Ride reset; timer stopped.\n");
     } else if (strcmp(command, "status") == 0) {
         long long seconds = ride_model_elapsed(&ride, now) / 1000000;
-        printf("Mode: %s | ride: %s | elapsed: %lld s | sensor: %s\n", imu_view ? "imu" : (ride_mode ? "ride" : "desk"),
+        printf("Mode: %s | ride: %s | elapsed: %lld s | sensor: %s\n", media_mode ? "system" : (ride_mode ? "ride" : "desk"),
                ride.running ? "running" : "paused", seconds,
                ride_model_sample_fresh(&ride, now) ? "valid" : "unavailable");
     } else {
@@ -411,7 +478,7 @@ bool weather_clock_command(const char *command)
         nvs_handle_t storage;
         esp_err_t result = nvs_open("device_ui", NVS_READWRITE, &storage);
         if (result == ESP_OK) {
-            result = nvs_set_u8(storage, "mode", ride_mode ? 1 : 0);
+            result = nvs_set_u8(storage, "mode", media_mode ? 2 : (ride_mode ? 1 : 0));
             if (result == ESP_OK) { result = nvs_commit(storage); }
             nvs_close(storage);
         }
@@ -419,7 +486,7 @@ bool weather_clock_command(const char *command)
     }
     if (handled && !enter_sleep && display && lvgl_port_lock(1000)) {
         /* 只有时钟页自动旋转；切出后立即回正，避免码表和诊断页短暂沿用横屏方向。 */
-        if ((ride_mode || imu_view) && lv_display_get_rotation(display) != LV_DISPLAY_ROTATION_0) {
+        if ((ride_mode || media_mode) && lv_display_get_rotation(display) != LV_DISPLAY_ROTATION_0) {
             lv_display_set_rotation(display, LV_DISPLAY_ROTATION_0);
             center_ui();
         }
@@ -429,7 +496,11 @@ bool weather_clock_command(const char *command)
         } else if (lv_display_get_screen_active(display) != selected_screen()) {
             lv_screen_load(selected_screen());
         }
-        touch_controls_update(imu_view ? 2 : (ride_mode ? 1 : 0), ride.running);
+        if (save_mode) {
+            if (open_imu) { entertainment_view_open_imu(); }
+            else { entertainment_view_home(); }
+        }
+        touch_controls_update(selected_page(), ride.running);
         lvgl_port_unlock();
     }
     xSemaphoreGive(state_mutex);
@@ -511,11 +582,11 @@ void weather_clock_tick(bool online, bool time_valid)
     if (!lvgl_port_lock(100)) { xSemaphoreGive(state_mutex); return; }
     /* 姿态只改变摆件的显示方向，不自动改变 desk/ride 模式；码表保持安装方向。 */
     lv_display_rotation_t rotation = LV_DISPLAY_ROTATION_0;
-    if (HW_AUTO_ROTATE_ENABLED && !ride_mode && !imu_view && hardware.imu_valid && hardware.rotation_valid) {
+    if (HW_AUTO_ROTATE_ENABLED && !ride_mode && !media_mode && !boot_overlay && hardware.imu_valid && hardware.rotation_valid) {
         if (hardware.rotation_degrees == 90) { rotation = LV_DISPLAY_ROTATION_90; }
         else if (hardware.rotation_degrees == 180) { rotation = LV_DISPLAY_ROTATION_180; }
         else if (hardware.rotation_degrees == 270) { rotation = LV_DISPLAY_ROTATION_270; }
-    } else if (!ride_mode && !imu_view) {
+    } else if (!ride_mode && !media_mode && !boot_overlay) {
         rotation = lv_display_get_rotation(display);
     }
     if (lv_display_get_rotation(display) != rotation) {
@@ -526,7 +597,7 @@ void weather_clock_tick(bool online, bool time_valid)
         lv_display_get_screen_loading(display) != selected_screen()) {
         lv_screen_load(selected_screen());
     }
-    touch_controls_update(imu_view ? 2 : (ride_mode ? 1 : 0), ride.running);
+    touch_controls_update(selected_page(), ride.running);
     if (ride_mode) {
         int64_t now = esp_timer_get_time();
         long long seconds = ride_model_elapsed(&ride, now) / 1000000;
@@ -576,6 +647,7 @@ void weather_clock_tick(bool online, bool time_valid)
     }
     device_status.wifi_connected = online;
     device_status.gps_fixed = hardware.gnss_valid;
+    device_status.tf_ready = entertainment_view_card_ready();
     for (unsigned index = 0; index < 3; ++index) {
         ui_status_bar_update(&status_bars[index], &device_status);
     }

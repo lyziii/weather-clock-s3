@@ -8,6 +8,7 @@ typedef struct {
     bool wifi_connected;
     bool bluetooth_connected;
     bool gps_fixed;
+    bool tf_ready;
     bool battery_valid;
     unsigned battery_percent;
     bool battery_charging;
@@ -17,6 +18,7 @@ typedef struct {
     lv_obj_t *wifi;
     lv_obj_t *bluetooth;
     lv_obj_t *gps;
+    lv_obj_t *tf;
     lv_obj_t *battery;
     bool show_gps;
 } ui_status_bar_t;

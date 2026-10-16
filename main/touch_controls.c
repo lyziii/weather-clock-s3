@@ -1,6 +1,7 @@
 #include "touch_controls.h"
 #include "esp_log.h"
 #include "ui_helpers.h"
+#include "entertainment_view.h"
 
 static lv_display_t *control_display;
 static bool (*submit_command)(const char *command);
@@ -10,6 +11,10 @@ static lv_obj_t *ride_buttons[3];
 static lv_obj_t *reset_overlay;
 static lv_obj_t *sleep_panel;
 static unsigned active_page = 3;
+static int gesture_start_y;
+static bool gestures_blocked;
+
+void touch_controls_set_blocked(bool blocked) { gestures_blocked = blocked; }
 
 static void slide_sleep_panel(void *object, int32_t y)
 {
@@ -99,9 +104,18 @@ static void show_sleep_panel(void)
 /* 原生手势按显示旋转后的坐标识别；一次滑动只提交一次，弹窗期间禁止翻页。 */
 static void page_gesture(lv_event_t *event)
 {
-    if (!control_display || reset_overlay || lv_display_get_screen_loading(control_display)) { return; }
+    if (gestures_blocked || !control_display || reset_overlay || lv_display_get_screen_loading(control_display)) { return; }
     lv_indev_t *input = lv_event_get_user_data(event);
+    if (lv_event_get_code(event) == LV_EVENT_PRESSED) {
+        lv_point_t point;
+        lv_indev_get_point(input, &point);
+        gesture_start_y = point.y;
+        return;
+    }
     lv_dir_t direction = lv_indev_get_gesture_dir(input);
+    /* 系统内容区纵滑留给列表，只有从标题栏开始下拉才打开电源面板。 */
+    if (active_page == 1 && lv_obj_is_hidden(sleep_panel) && gesture_start_y >= 32 &&
+        (direction == LV_DIR_BOTTOM || direction == LV_DIR_TOP)) { return; }
     if (direction == LV_DIR_BOTTOM) {
         show_sleep_panel();
         lv_indev_wait_release(input);
@@ -113,6 +127,13 @@ static void page_gesture(lv_event_t *event)
         return;
     }
     if (!lv_obj_is_hidden(sleep_panel)) { return; }
+    /* 系统二级页左滑返回首页，禁止横滑误切到其他一级页。 */
+    if (active_page == 1 && entertainment_view_is_child() &&
+        (direction == LV_DIR_LEFT || direction == LV_DIR_RIGHT)) {
+        if (direction == LV_DIR_LEFT) { entertainment_view_home(); }
+        lv_indev_wait_release(input);
+        return;
+    }
     const char *command;
     if (direction == LV_DIR_RIGHT) { command = "page next"; }
     else if (direction == LV_DIR_LEFT) { command = "page prev"; }
@@ -231,6 +252,7 @@ void touch_controls_create(lv_display_t *display, lv_obj_t *ride_page,
         if (lv_indev_get_type(input) == LV_INDEV_TYPE_POINTER &&
             lv_indev_get_display(input) == display) {
             lv_indev_add_event_cb(input, page_gesture, LV_EVENT_GESTURE, input);
+            lv_indev_add_event_cb(input, page_gesture, LV_EVENT_PRESSED, input);
             break;
         }
     }
@@ -247,7 +269,9 @@ void touch_controls_update(unsigned page, bool running)
     for (unsigned index = 0; index < 3; ++index) {
         lv_obj_set_style_bg_color(page_dots[index],
                                  lv_color_hex(index == page ? 0x8CE2BE : 0x527C6E), 0);
-        bool disabled = page != 1 || (index == 0 && running) || (index == 1 && !running);
+    }
+    for (unsigned index = 0; index < 3; ++index) {
+        bool disabled = page != 2 || (index == 0 && running) || (index == 1 && !running);
         if (disabled) { lv_obj_add_state(ride_buttons[index], LV_STATE_DISABLED); }
         else { lv_obj_remove_state(ride_buttons[index], LV_STATE_DISABLED); }
     }

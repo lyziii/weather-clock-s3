@@ -25,6 +25,7 @@
 #include "board_hardware.h"
 #include "board_power.h"
 #include "power_manager.h"
+#include "touch_sound.h"
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAILED_BIT BIT1
@@ -273,6 +274,8 @@ void app_main(void)
     ESP_ERROR_CHECK(weather_clock_init());
     result = board_power_init();
     if (result != ESP_OK) { printf("Power sampling unavailable: %s\n", esp_err_to_name(result)); }
+    result = touch_sound_init();
+    if (result != ESP_OK) { printf("Touch sound unavailable: %s\n", esp_err_to_name(result)); }
     if (xTaskCreate(clock_task, "clock", 4096, NULL, 3, NULL) != pdPASS) {
         abort();
     }

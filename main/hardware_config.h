@@ -33,9 +33,16 @@
 #define HW_TOUCH_MIRROR_X 0
 #define HW_TOUCH_MIRROR_Y 0
 
-/* 仅保留音频硬件资源，不初始化尚无播放/录音需求的 ES8311。 */
+/* ES8311 输出到板载功放；仅用于触摸短音，不启动麦克风采集。 */
 #define HW_AUDIO_ENABLE_GPIO 1
 #define HW_AUDIO_ENABLE_LEVEL 0
+#define HW_AUDIO_MCLK 4
+#define HW_AUDIO_BCLK 5
+/* 按最新板卡表，ESP32 播放输出使用 IO8；IO6 是录音输入，当前不启用。 */
+#define HW_AUDIO_DOUT 8
+#define HW_AUDIO_WS 7
+/* 触摸音默认音量；范围 0~100，同时作用于触摸音和诊断音。 */
+#define HW_AUDIO_CLICK_VOLUME 60
 
 /* 两路均为二分之一分压；VBUS 阈值是调试起点，须在负载下实测。 */
 #define HW_BATTERY_GPIO 9

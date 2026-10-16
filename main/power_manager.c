@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 #include "hardware_config.h"
 #include "power_manager.h"
+#include "touch_sound.h"
 
 #define WAKE_TAP_LIMIT 3
 #define WAKE_TAP_WINDOW_US 5000000ULL
@@ -89,6 +90,7 @@ static bool wait_for_touch_release(void)
 
 void power_manager_enter_sleep(void)
 {
+    touch_sound_prepare_sleep();
     sleep_sequence_armed = true;
     wake_tap_count = 0;
     (void)esp_wifi_stop();

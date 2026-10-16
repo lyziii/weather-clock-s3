@@ -16,6 +16,7 @@ static lv_obj_t *create_icon(lv_obj_t *parent, const char *symbol, int left, int
 void ui_status_bar_create(ui_status_bar_t *bar, lv_obj_t *parent, bool show_gps)
 {
     bar->show_gps = show_gps;
+    bar->tf = create_icon(parent, LV_SYMBOL_SD_CARD, 110, 14);
     bar->gps = create_icon(parent, LV_SYMBOL_GPS, 126, 16);
     bar->bluetooth = create_icon(parent, LV_SYMBOL_BLUETOOTH, 144, 16);
     bar->wifi = create_icon(parent, LV_SYMBOL_WIFI, 162, 18);
@@ -26,6 +27,7 @@ void ui_status_bar_create(ui_status_bar_t *bar, lv_obj_t *parent, bool show_gps)
 
 void ui_status_bar_update(ui_status_bar_t *bar, const ui_status_t *status)
 {
+    lv_obj_set_hidden(bar->tf, !status->tf_ready);
     lv_obj_set_hidden(bar->wifi, !status->wifi_connected);
     lv_obj_set_hidden(bar->bluetooth, !status->bluetooth_connected);
     lv_obj_set_hidden(bar->gps, !bar->show_gps || !status->gps_fixed);

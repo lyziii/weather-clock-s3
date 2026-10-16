@@ -122,7 +122,7 @@ static void draw_imu_arrow(lv_event_t *event)
 /* 定时器只读取硬件快照，不获取应用状态锁，保持既有锁顺序。 */
 static void update_imu_ui(lv_timer_t *timer)
 {
-    if (!display || lv_display_get_screen_active(display) != imu_screen) { return; }
+    if (!display || !imu_screen || !lv_obj_is_visible(imu_screen)) { return; }
     board_hardware_snapshot_t hardware;
     bool snapshot_ready = board_hardware_snapshot(&hardware);
     const char *state = !HW_MPU6050_ENABLED ? "DISABLED" :
@@ -213,11 +213,22 @@ static void delete_imu_view(lv_event_t *event)
 
 lv_obj_t *imu_view_create(lv_display_t *created_display)
 {
+    return imu_view_create_in(created_display, NULL);
+}
+
+lv_obj_t *imu_view_create_in(lv_display_t *created_display, lv_obj_t *parent)
+{
     display = created_display;
-    imu_screen = lv_obj_create(NULL);
+    imu_screen = lv_obj_create(parent);
+    lv_obj_set_style_pad_all(imu_screen, 0, 0);
+    lv_obj_set_style_border_width(imu_screen, 0, 0);
+    if (parent) {
+        lv_obj_set_pos(imu_screen, 0, 0);
+        lv_obj_set_size(imu_screen, 240, 320);
+    }
     lv_obj_set_style_bg_color(imu_screen, lv_color_hex(0x101918), 0);
     lv_obj_set_scrollable(imu_screen, false);
-    make_label(imu_screen, "MPU6050", 12, 8, 108, LV_FONT_DEFAULT, 0xFFFFFF);
+    make_label(imu_screen, "MPU6050", 12, 8, 94, LV_FONT_DEFAULT, 0xFFFFFF);
     imu_state_label = make_label(imu_screen, "WAITING", 12, 79, 108, &lv_font_montserrat_12, 0xFFB86B);
     char wiring[64];
     snprintf(wiring, sizeof(wiring), "ADDR %02X  SDA %d  SCL %d",

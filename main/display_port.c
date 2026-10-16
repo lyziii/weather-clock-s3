@@ -14,6 +14,7 @@
 #include "hardware_config.h"
 #include "weather_clock_config.h"
 #include "display_port.h"
+#include "touch_sound.h"
 
 #define DRAW_LINES 24
 #define TOUCH_THRESHOLD 22
@@ -28,6 +29,18 @@ static char touch_diagnostic[24] = "NO INPUT";
 static uint8_t touch_vendor_id;
 static uint8_t touch_chip_id;
 static bool touch_ids_valid;
+
+static lv_indev_read_cb_t original_touch_read;
+static bool touch_was_pressed;
+
+/* 直接判断采样按下沿，禁用控件、空白区域和滑动也遵循每次落指只响一次。 */
+static void read_touch_with_sound(lv_indev_t *input, lv_indev_data_t *data)
+{
+    original_touch_read(input, data);
+    bool pressed = data->state == LV_INDEV_STATE_PRESSED;
+    if (pressed && !touch_was_pressed) { touch_sound_play(); }
+    touch_was_pressed = pressed;
+}
 
 const char *display_port_touch_diagnostic(void)
 {
@@ -243,6 +256,10 @@ esp_err_t display_port_init(lv_display_t **output, void (*create_pages)(lv_displ
     ESP_LOGI(TAG, "LCD stage: display added; acquiring UI lock");
     if (!lvgl_port_lock(1000)) { result = ESP_ERR_TIMEOUT; goto cleanup; }
     *output = display;
+    if (touch_input) {
+        original_touch_read = lv_indev_get_read_cb(touch_input);
+        lv_indev_set_read_cb(touch_input, read_touch_with_sound);
+    }
     create_pages(display);
     lvgl_port_unlock();
     result = esp_lcd_panel_disp_on_off(panel, true);
