@@ -21,6 +21,7 @@
 #include "ui_helpers.h"
 #include "weather_service.h"
 #include "touch_controls.h"
+#include "power_manager.h"
 
 #define NETWORK_READY BIT0
 #define TIME_READY BIT1
@@ -353,8 +354,11 @@ bool weather_clock_command(const char *command)
     int64_t now = esp_timer_get_time();
     bool handled = true;
     bool save_mode = false;
+    bool enter_sleep = strcmp(command, "power sleep") == 0;
     lv_screen_load_anim_t transition = LV_SCREEN_LOAD_ANIM_NONE;
-    if (strcmp(command, "page next") == 0 || strcmp(command, "page prev") == 0) {
+    if (enter_sleep) {
+        printf("Entering touch-wake sleep. Tap the screen three times to wake.\n");
+    } else if (strcmp(command, "page next") == 0 || strcmp(command, "page prev") == 0) {
         int page = imu_view ? 2 : (ride_mode ? 1 : 0);
         bool forward = strcmp(command, "page next") == 0;
         int next_page = page + (forward ? 1 : -1);
@@ -367,7 +371,9 @@ bool weather_clock_command(const char *command)
         command = commands[next_page];
         transition = forward ? LV_SCREEN_LOAD_ANIM_MOVE_RIGHT : LV_SCREEN_LOAD_ANIM_MOVE_LEFT;
     }
-    if (strcmp(command, "mode desk") == 0 || strcmp(command, "mode ride") == 0) {
+    if (enter_sleep) {
+        /* 睡眠动作在状态锁释放后执行，不能让 LVGL 回调路径持锁进入深睡。 */
+    } else if (strcmp(command, "mode desk") == 0 || strcmp(command, "mode ride") == 0) {
         imu_view = false;
         bool next_ride = strcmp(command, "mode ride") == 0;
         if (!next_ride) { ride_model_pause(&ride, now); previous_gnss_us = 0; }
@@ -411,7 +417,7 @@ bool weather_clock_command(const char *command)
         }
         if (result != ESP_OK) { printf("Mode not saved: %s\n", esp_err_to_name(result)); }
     }
-    if (handled && display && lvgl_port_lock(1000)) {
+    if (handled && !enter_sleep && display && lvgl_port_lock(1000)) {
         /* 只有时钟页自动旋转；切出后立即回正，避免码表和诊断页短暂沿用横屏方向。 */
         if ((ride_mode || imu_view) && lv_display_get_rotation(display) != LV_DISPLAY_ROTATION_0) {
             lv_display_set_rotation(display, LV_DISPLAY_ROTATION_0);
@@ -427,6 +433,10 @@ bool weather_clock_command(const char *command)
         lvgl_port_unlock();
     }
     xSemaphoreGive(state_mutex);
+    if (enter_sleep) {
+        display_port_prepare_sleep();
+        power_manager_enter_sleep();
+    }
     return handled;
 }
 

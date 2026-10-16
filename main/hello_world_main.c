@@ -24,6 +24,7 @@
 #include "weather_clock.h"
 #include "board_hardware.h"
 #include "board_power.h"
+#include "power_manager.h"
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAILED_BIT BIT1
@@ -229,6 +230,7 @@ static void clock_task(void *argument)
 
 void app_main(void)
 {
+    power_manager_handle_wakeup();
     setvbuf(stdout, NULL, _IONBF, 0);
     /* 中断驱动允许控制台阻塞等待，USB 未连接时界面和采集仍继续运行。 */
     usb_serial_jtag_driver_config_t console = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
@@ -236,6 +238,9 @@ void app_main(void)
     usb_serial_jtag_vfs_use_driver();
     usb_serial_jtag_vfs_set_tx_line_endings(ESP_LINE_ENDINGS_CRLF);
     printf("\nESP32-S3R8 weather clock ready. Console: native USB Serial/JTAG.\n");
+    if (power_manager_wakeup_fault()) {
+        printf("Touch wake interrupt did not release; starting normally for recovery.\n");
+    }
 
     esp_err_t result = nvs_flash_init();
     if (result == ESP_ERR_NVS_NO_FREE_PAGES || result == ESP_ERR_NVS_NEW_VERSION_FOUND) {

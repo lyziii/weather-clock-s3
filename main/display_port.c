@@ -17,12 +17,12 @@
 
 #define DRAW_LINES 24
 #define TOUCH_THRESHOLD 22
-#define TOUCH_POLL_MS 10
 
 static const char *TAG = "display_port";
 static esp_lcd_panel_io_handle_t touch_io;
 static esp_lcd_touch_handle_t touch_handle;
 static lv_indev_t *touch_input;
+static esp_lcd_panel_handle_t active_panel;
 static const char *touch_stage = "OFF";
 static char touch_diagnostic[24] = "NO INPUT";
 static uint8_t touch_vendor_id;
@@ -101,8 +101,7 @@ static esp_err_t initialize_touch(lv_display_t *display)
              touch_vendor_id, esp_err_to_name(vendor_result), touch_chip_id, esp_err_to_name(chip_result));
     esp_lcd_touch_config_t config = {
         .x_max = LCD_WIDTH, .y_max = LCD_HEIGHT,
-        /* 先用周期轮询验证坐标链路，避免 INT17 没有边沿时输入设备完全不读取。 */
-        .rst_gpio_num = GPIO_NUM_NC, .int_gpio_num = GPIO_NUM_NC,
+        .rst_gpio_num = GPIO_NUM_NC, .int_gpio_num = HW_TOUCH_INT,
         .levels = { .reset = 0, .interrupt = 0 },
         .flags = {
             .swap_xy = HW_TOUCH_SWAP_XY,
@@ -112,10 +111,18 @@ static esp_err_t initialize_touch(lv_display_t *display)
     touch_stage = "DRIVER";
     result = esp_lcd_touch_new_i2c_ft6x36(touch_io, &config, &touch_handle);
     if (result == ESP_OK) {
+        result = gpio_set_pull_mode(HW_TOUCH_INT, GPIO_PULLUP_ONLY);
+    }
+    if (result == ESP_OK) {
         /* 默认阈值 128 会漏掉轻触；降低检测阈值，但保留控制器自身的噪声过滤。 */
         touch_stage = "SENSE";
         const uint8_t threshold = TOUCH_THRESHOLD;
         result = esp_lcd_panel_io_tx_param(touch_io, 0x80, &threshold, sizeof(threshold));
+    }
+    if (result == ESP_OK) {
+        /* FT6336G 的 G_MODE=2 为中断模式，触摸时 INT 拉低。 */
+        const uint8_t interrupt_mode = 0x02;
+        result = esp_lcd_panel_io_tx_param(touch_io, 0xA4, &interrupt_mode, sizeof(interrupt_mode));
     }
     if (result == ESP_OK) {
         touch_stage = "LVGL";
@@ -123,15 +130,15 @@ static esp_err_t initialize_touch(lv_display_t *display)
         touch_input = lvgl_port_add_touch(&port);
         if (!touch_input) { result = ESP_ERR_NO_MEM; }
         else {
-            lvgl_port_lock(0);
-            lv_timer_t *read_timer = lv_indev_get_read_timer(touch_input);
-            if (read_timer) { lv_timer_set_period(read_timer, TOUCH_POLL_MS); }
-            lvgl_port_unlock();
-            ESP_LOGI(TAG, "FT6336G registered: addr=0x%02X SDA=%d SCL=%d RST=%d, polling (INT%d unused)",
+            /* LVGL 需在按下和释放沿都读取状态，避免事件模式卡在 pressed。 */
+            result = gpio_set_intr_type(HW_TOUCH_INT, GPIO_INTR_ANYEDGE);
+            if (result != ESP_OK) { goto touch_cleanup; }
+            ESP_LOGI(TAG, "FT6336G registered: addr=0x%02X SDA=%d SCL=%d RST=%d INT%d active-low",
                      HW_TOUCH_ADDRESS, HW_I2C_SDA, HW_I2C_SCL, HW_TOUCH_RST, HW_TOUCH_INT);
-            ESP_LOGI(TAG, "Touch threshold=%d, polling=%d ms", TOUCH_THRESHOLD, TOUCH_POLL_MS);
+            ESP_LOGI(TAG, "Touch threshold=%d, interrupt mode", TOUCH_THRESHOLD);
         }
     }
+touch_cleanup:
     if (result != ESP_OK) {
         if (touch_handle) { esp_lcd_touch_del(touch_handle); touch_handle = NULL; }
         esp_lcd_panel_io_del(touch_io);
@@ -192,6 +199,7 @@ esp_err_t display_port_init(lv_display_t **output, void (*create_pages)(lv_displ
         result = esp_lcd_new_panel_st7789(io, &panel_config, &panel);
     }
     if (result != ESP_OK) { goto cleanup; }
+    active_panel = panel;
     result = esp_lcd_panel_reset(panel);
     if (result != ESP_OK) { goto cleanup; }
     result = esp_lcd_panel_init(panel);
@@ -251,8 +259,25 @@ cleanup:
     if (display) { lvgl_port_remove_disp(display); }
     if (port_ready) { lvgl_port_deinit(); }
     if (panel) { esp_lcd_panel_del(panel); }
+    active_panel = NULL;
     if (io) { esp_lcd_panel_io_del(io); }
     if (bus_ready) { spi_bus_free(SPI2_HOST); }
     *output = NULL;
     return result;
+}
+
+void display_port_prepare_sleep(void)
+{
+    if (!active_panel) { return; }
+    if (lvgl_port_lock(1000)) {
+        esp_lcd_panel_disp_on_off(active_panel, false);
+        esp_lcd_panel_disp_sleep(active_panel, true);
+        if (LCD_PIN_BL >= 0) { gpio_set_level(LCD_PIN_BL, !LCD_BACKLIGHT_ON_LEVEL); }
+        lvgl_port_unlock();
+    }
+    /* 释放触摸中断锁存，避免刚进入深睡就被仍为低电平的 INT 再次唤醒。 */
+    for (unsigned attempt = 0; attempt < 150 && gpio_get_level(HW_TOUCH_INT) == 0; ++attempt) {
+        esp_lcd_touch_read_data(touch_handle);
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
