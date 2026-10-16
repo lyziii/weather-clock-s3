@@ -1,0 +1,28 @@
+# Generated ESP-IDF outputs and downloaded dependencies.
+/build/
+/managed_components/
+/sdkconfig
+/sdkconfig.old
+/sdkconfig.backup
+*.bin
+*.elf
+*.map
+*.log
+
+# Machine-specific editor settings and credentials.
+/.vscode/
+/.clangd
+/.clangd/
+/compile_commands.json
+.env
+.env.*
+!.env.example
+*.key
+
+# Temporary files.
+__pycache__/
+*.pyc
+*.swp
+*.tmp
+.DS_Store
+Thumbs.db
