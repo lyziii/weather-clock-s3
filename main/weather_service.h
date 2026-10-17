@@ -11,3 +11,4 @@ typedef struct {
 
 esp_err_t weather_service_fetch(weather_data_t *weather);
 const char *weather_service_description(int code);
+const char *weather_service_description_zh(int code);

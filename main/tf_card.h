@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "sdmmc_cmd.h"
 
 #define TF_PATH_SIZE 512
 #define TF_PAGE_SIZE 12
@@ -33,3 +34,14 @@ typedef struct {
 esp_err_t tf_card_init(void);
 bool tf_card_snapshot(tf_snapshot_t *snapshot);
 bool tf_card_browse(const char *path, unsigned page);
+
+/* 串行化所有 TF 卡访问（目录浏览、字库读取、挂载/卸载）。
+ * 字库等外部 VFS 使用者在每次文件操作前后调用；USB 切换会先取此锁，
+ * 保证卸载时没有正在进行的目录或字库访问。 */
+void tf_card_lock(void);
+void tf_card_unlock(void);
+
+/* USB MSC（U盘）支持：进入 USB 模式时暂停本地文件系统、卸载 VFS 并重新
+ * 初始化一张卡给 USB 块设备；退出时释放 USB 卡并重新挂载 VFS。 */
+sdmmc_card_t *tf_card_enter_usb(void);
+esp_err_t tf_card_exit_usb(void);

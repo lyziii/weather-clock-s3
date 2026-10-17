@@ -5,6 +5,7 @@ dependencies:
   espressif/cjson: "^1.7.19"
   espressif/esp_lcd_ili9341: "^2.1.0"
   espressif/esp_codec_dev: "^1.6.2"
+  espressif/esp_tinyusb: "^2.4.0"
   k0i05/esp_mpu6050: "^1.2.7"
   igrr/libnmea: "^0.2.1"
   cfscn/esp_lcd_touch_ft6x36: "^1.0.8"

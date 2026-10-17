@@ -7,6 +7,9 @@
 #include "imu_view.h"
 #include "entertainment_view.h"
 #include "tf_card.h"
+#include "wifi_view.h"
+#include "zh_font.h"
+#include "usb_msc.h"
 #include "ui_helpers.h"
 
 static lv_obj_t *screen;
@@ -16,6 +19,7 @@ static lv_obj_t *storage;
 static lv_obj_t *gyroscope;
 static lv_obj_t *magnetometer;
 static lv_obj_t *gps;
+static lv_obj_t *wifi;
 static lv_obj_t *child_title;
 static lv_obj_t *magnetic_state;
 static lv_obj_t *magnetic_values[3];
@@ -67,6 +71,27 @@ static lv_obj_t *button(lv_obj_t *parent, const char *text, int x, int y,
     return control;
 }
 
+/* 文件列表行：文件名可能含中文，优先用中文字库，未加载时回退 Montserrat。 */
+static lv_obj_t *file_button(lv_obj_t *parent, const char *text, int x, int y,
+                             int width, int height, lv_event_cb_t callback, void *data)
+{
+    lv_obj_t *control = lv_button_create(parent);
+    lv_obj_set_pos(control, x, y);
+    lv_obj_set_size(control, width, height);
+    lv_obj_set_style_radius(control, 4, 0);
+    lv_obj_set_style_bg_color(control, lv_color_hex(0x283B36), 0);
+    lv_obj_set_style_shadow_width(control, 0, 0);
+    lv_obj_set_scrollable(control, false);
+    const lv_font_t *font = zh_font();
+    if (!font) { font = &lv_font_montserrat_12; }
+    lv_obj_t *label = make_label(control, text, 0, 0, width - 12, font, 0xFFFFFF);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_center(label);
+    lv_obj_add_event_cb(control, callback, LV_EVENT_CLICKED, data);
+    return control;
+}
+
 void entertainment_view_home(void)
 {
     child = false;
@@ -76,6 +101,7 @@ void entertainment_view_home(void)
     lv_obj_set_hidden(gyroscope, true);
     lv_obj_set_hidden(magnetometer, true);
     lv_obj_set_hidden(gps, true);
+    lv_obj_set_hidden(wifi, true);
     lv_obj_set_hidden(child_title, true);
     lv_obj_set_hidden(back_button, true);
 }
@@ -86,8 +112,8 @@ bool entertainment_view_card_ready(void) { return snapshot.mounted; }
 static void show_child(unsigned destination)
 {
     if (!destination) { entertainment_view_home(); return; }
-    if (destination > 5) { return; }
-    const char *titles[] = {"", "MUSIC", "TF CARD", "GYROSCOPE", "MAGNETOMETER", "GPS"};
+    if (destination > 6) { return; }
+    const char *titles[] = {"", "MUSIC", "TF CARD", "GYROSCOPE", "MAGNETOMETER", "GPS", "WIFI"};
     child = true;
     lv_obj_set_hidden(home, true);
     lv_obj_set_hidden(back_button, false);
@@ -96,6 +122,7 @@ static void show_child(unsigned destination)
     lv_obj_set_hidden(gyroscope, destination != 3);
     lv_obj_set_hidden(magnetometer, destination != 4);
     lv_obj_set_hidden(gps, destination != 5);
+    lv_obj_set_hidden(wifi, destination != 6);
     lv_obj_set_hidden(child_title, false);
     lv_label_set_text(child_title, titles[destination]);
     if (destination == 2) { tf_card_browse("/", 0); }
@@ -104,6 +131,17 @@ static void show_child(unsigned destination)
 static void navigate(lv_event_t *event)
 {
     show_child((unsigned)(uintptr_t)lv_event_get_user_data(event));
+}
+
+/* USB 磁盘模式：点击进入/退出，让电脑直接读写 TF 卡。 */
+static void usb_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (usb_msc_active()) {
+        usb_msc_stop();
+    } else {
+        usb_msc_start();
+    }
 }
 
 void entertainment_view_open_imu(void) { show_child(3); }
@@ -276,6 +314,9 @@ static void refresh_sensors(lv_timer_t *timer)
 static void refresh(lv_timer_t *timer)
 {
     (void)timer;
+    zh_font_tick();
+    const lv_font_t *font = zh_font();
+    if (font) { lv_obj_set_style_text_font(file_detail, font, 0); }
     if (!tf_card_snapshot(&incoming) || incoming.revision == rendered_revision) { return; }
     snapshot = incoming;
     rendered_revision = snapshot.revision;
@@ -309,8 +350,8 @@ static void refresh(lv_timer_t *timer)
         char text[288];
         snprintf(text, sizeof(text), "%s %s", entry->directory ? LV_SYMBOL_DIRECTORY : LV_SYMBOL_FILE,
                  entry->name);
-        lv_obj_t *row = button(file_list, text, 0, index * 34, 212, 32,
-                                browse_clicked, (void *)(uintptr_t)index);
+        lv_obj_t *row = file_button(file_list, text, 0, index * 34, 212, 32,
+                                    browse_clicked, (void *)(uintptr_t)index);
         lv_obj_set_style_bg_color(row, lv_color_hex(0x1C2B26), 0);
     }
     lv_obj_scroll_to_y(file_list, 0, LV_ANIM_OFF);
@@ -352,8 +393,10 @@ lv_obj_t *entertainment_view_create(void)
     button(home, LV_SYMBOL_REFRESH "  Gyroscope", 14, 128, 212, 52, navigate, (void *)3);
     button(home, LV_SYMBOL_LOOP "  Magnetometer", 14, 188, 212, 52, navigate, (void *)4);
     button(home, LV_SYMBOL_GPS "  GPS", 14, 248, 212, 52, navigate, (void *)5);
+    button(home, LV_SYMBOL_WIFI "  WiFi", 14, 308, 212, 52, navigate, (void *)6);
+    button(home, LV_SYMBOL_SD_CARD "  USB Disk", 14, 368, 212, 52, usb_clicked, NULL);
     /* 视频暂不提供可点击入口，避免让未实现的功能看起来可用。 */
-    make_label(home, LV_SYMBOL_VIDEO "  Video - unavailable", 20, 320, 202,
+    make_label(home, LV_SYMBOL_VIDEO "  Video - unavailable", 20, 428, 202,
                 &lv_font_montserrat_12, 0x8CA49B);
     music = content();
     make_label(music, LV_SYMBOL_AUDIO, 92, 36, 56, &lv_font_montserrat_28, 0x8CE2BE);
@@ -422,6 +465,8 @@ lv_obj_t *entertainment_view_create(void)
     gps_speed = make_label(gps, "Speed -- km/h", 14, 128, 212, &lv_font_montserrat_12, 0xFFFFFF);
     gps_altitude = make_label(gps, "Altitude -- m", 14, 158, 212, &lv_font_montserrat_12, 0xFFFFFF);
     gps_age = make_label(gps, "AGE --", 14, 208, 212, &lv_font_montserrat_12, 0x8CA49B);
+    wifi = content();
+    wifi_view_create_in(lv_obj_get_display(screen), wifi);
     back_button = button(screen, LV_SYMBOL_LEFT, 10, 36, 34, 30, navigate, NULL);
     child_title = make_label(screen, "", 54, 44, 174, &lv_font_montserrat_12, 0xC1CBC9);
     /* 二级页向下让出返回键，文件区仍保持可滚动且不会越过底部。 */
@@ -440,6 +485,8 @@ lv_obj_t *entertainment_view_create(void)
         lv_obj_set_pos(sensor_pages[index], 0, 68);
         lv_obj_set_height(sensor_pages[index], 244);
     }
+    lv_obj_set_pos(wifi, 0, 68);
+    lv_obj_set_height(wifi, 250);
     entertainment_view_home();
     lv_timer_create(refresh_sensors, 100, NULL);
     lv_timer_create(refresh, 500, NULL);

@@ -12,31 +12,25 @@
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
-#include "esp_wifi.h"
-#include "nvs.h"
 #include "nvs_flash.h"
 #include "weather_clock.h"
 #include "board_hardware.h"
 #include "board_power.h"
 #include "power_manager.h"
 #include "touch_sound.h"
-
-#define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAILED_BIT BIT1
-#define WIFI_RETRY_LIMIT 5
+#include "wifi_manager.h"
 
 /* USB 负责交互配置，UART43/44 保留给 GPS，时钟后台独立刷新。 */
-static EventGroupHandle_t wifi_events;
-static unsigned wifi_retries;
-static bool wifi_started;
 static bool sntp_initialized;
 static EventGroupHandle_t clock_events;
+static SemaphoreHandle_t sntp_mutex;
 #define TIME_VALID_BIT BIT0
 #define CLOCK_DISPLAY_BIT BIT1
 
@@ -79,53 +73,6 @@ static bool read_line(char *buffer, size_t capacity, bool secret)
     }
 }
 
-static void wifi_event_handler(void *argument, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data)
-{
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        xEventGroupClearBits(wifi_events, WIFI_CONNECTED_BIT);
-        if (wifi_retries++ < WIFI_RETRY_LIMIT) {
-            esp_wifi_connect();
-        } else {
-            xEventGroupSetBits(wifi_events, WIFI_FAILED_BIT);
-        }
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        const ip_event_got_ip_t *event = event_data;
-        wifi_retries = 0;
-        xEventGroupClearBits(wifi_events, WIFI_FAILED_BIT);
-        xEventGroupSetBits(wifi_events, WIFI_CONNECTED_BIT);
-        printf("\nWiFi connected. IP: " IPSTR "\n", IP2STR(&event->ip_info.ip));
-    }
-}
-
-static bool load_wifi_config(wifi_config_t *config)
-{
-    nvs_handle_t storage;
-    if (nvs_open("wifi_clock", NVS_READONLY, &storage) != ESP_OK) {
-        return false;
-    }
-    size_t size = sizeof(config->sta);
-    esp_err_t result = nvs_get_blob(storage, "station", &config->sta, &size);
-    nvs_close(storage);
-    return result == ESP_OK && size == sizeof(config->sta) && config->sta.ssid[0] != 0;
-}
-
-static void save_wifi_config(const wifi_config_t *config)
-{
-    nvs_handle_t storage;
-    esp_err_t result = nvs_open("wifi_clock", NVS_READWRITE, &storage);
-    if (result == ESP_OK) {
-        result = nvs_set_blob(storage, "station", &config->sta, sizeof(config->sta));
-        if (result == ESP_OK) {
-            result = nvs_commit(storage);
-        }
-        nvs_close(storage);
-    }
-    printf("WiFi settings %s.\n", result == ESP_OK ? "saved" : "could not be saved");
-}
-
 static bool prompt_wifi_config(wifi_config_t *config)
 {
     char ssid[40];
@@ -165,33 +112,16 @@ static bool prompt_wifi_config(wifi_config_t *config)
     }
 }
 
-static bool connect_wifi(wifi_config_t *config)
-{
-    wifi_retries = 0;
-    xEventGroupClearBits(wifi_events, WIFI_CONNECTED_BIT | WIFI_FAILED_BIT);
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    wifi_started = true;
-    printf("Connecting to WiFi...\n");
-    EventBits_t result = xEventGroupWaitBits(wifi_events,
-        WIFI_CONNECTED_BIT | WIFI_FAILED_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(30000));
-    return (result & WIFI_CONNECTED_BIT) != 0;
-}
-
-static void stop_wifi(void)
-{
-    if (wifi_started) {
-        ESP_ERROR_CHECK(esp_wifi_stop());
-        wifi_started = false;
-    }
-    xEventGroupClearBits(wifi_events, WIFI_CONNECTED_BIT | WIFI_FAILED_BIT);
-}
-
 /* 只在联网后启动 SNTP；超时不输出 1970 年假时间，允许串口主动重试。 */
 static void synchronize_time(void)
 {
-    if (!(xEventGroupGetBits(wifi_events) & WIFI_CONNECTED_BIT)) {
-        printf("WiFi offline. Enter config to reconnect.\n");
+    if (xSemaphoreTake(sntp_mutex, 0) != pdTRUE) {
+        printf("Time sync already in progress.\n");
+        return;
+    }
+    if (!wifi_manager_connected()) {
+        printf("WiFi offline. Configure WiFi in System menu or enter config.\n");
+        xSemaphoreGive(sntp_mutex);
         return;
     }
     if (sntp_initialized) {
@@ -208,13 +138,14 @@ static void synchronize_time(void)
     } else {
         printf("Time sync failed: %s. Enter sync to retry.\n", esp_err_to_name(result));
     }
+    xSemaphoreGive(sntp_mutex);
 }
 
 static void clock_task(void *argument)
 {
     for (;;) {
         EventBits_t state = xEventGroupGetBits(clock_events);
-        bool online = (xEventGroupGetBits(wifi_events) & WIFI_CONNECTED_BIT) != 0;
+        bool online = wifi_manager_connected();
         weather_clock_tick(online, (state & TIME_VALID_BIT) != 0);
         if ((state & (TIME_VALID_BIT | CLOCK_DISPLAY_BIT)) == (TIME_VALID_BIT | CLOCK_DISPLAY_BIT)) {
             time_t now = time(NULL);
@@ -223,8 +154,23 @@ static void clock_task(void *argument)
             localtime_r(&now, &local_time);
             strftime(date_time, sizeof(date_time), "%Y-%m-%d %H:%M:%S", &local_time);
             printf("Date/time: %s UTC+8%s\n", date_time,
-                   (xEventGroupGetBits(wifi_events) & WIFI_CONNECTED_BIT) ? "" : " (WiFi offline)");
+                   wifi_manager_connected() ? "" : " (WiFi offline)");
         }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+/* 每次联网成功（含重连）自动同步一次时间，与串口手动 sync 互补。 */
+static void time_sync_task(void *argument)
+{
+    (void)argument;
+    bool previous = false;
+    for (;;) {
+        bool connected = wifi_manager_connected();
+        if (connected && !previous) {
+            synchronize_time();
+        }
+        previous = connected;
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -249,23 +195,21 @@ void app_main(void)
         result = nvs_flash_init();
     }
     ESP_ERROR_CHECK(result);
-    wifi_events = xEventGroupCreate();
     clock_events = xEventGroupCreate();
-    if (!wifi_events || !clock_events) {
+    if (!clock_events) {
         abort();
     }
     xEventGroupSetBits(clock_events, CLOCK_DISPLAY_BIT);
+    sntp_mutex = xSemaphoreCreateMutex();
+    if (!sntp_mutex) {
+        abort();
+    }
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     if (!esp_netif_create_default_wifi_sta()) {
         abort();
     }
-    wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&init_config));
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(wifi_manager_init());
     setenv("TZ", "CST-8", 1);
     tzset();
     /* 界面和天气任务先启动，串口等待输入和 NTP 等待均不会阻塞屏幕刷新。 */
@@ -279,24 +223,19 @@ void app_main(void)
     if (xTaskCreate(clock_task, "clock", 4096, NULL, 3, NULL) != pdPASS) {
         abort();
     }
+    if (xTaskCreate(time_sync_task, "time_sync", 3072, NULL, 3, NULL) != pdPASS) {
+        abort();
+    }
     printf("\nWiFi initialization complete. Checking saved settings...\n");
 
+    /* 非阻塞：有保存凭据则直接尝试，无凭据时界面与串口均可配置。 */
     wifi_config_t wifi_config = {0};
-    bool stored_config = load_wifi_config(&wifi_config);
-    for (;;) {
-        if (!stored_config) {
-            if (!prompt_wifi_config(&wifi_config)) { break; }
-        } else {
-            printf("Trying saved WiFi settings...\n");
-        }
-        if (connect_wifi(&wifi_config)) {
-            save_wifi_config(&wifi_config);
-            synchronize_time();
-            break;
-        }
-        printf("WiFi connection failed. Check 2.4 GHz SSID/password.\n");
-        stop_wifi();
-        stored_config = false;
+    if (wifi_manager_load(&wifi_config)) {
+        printf("Trying saved WiFi settings...\n");
+        wifi_manager_connect((const char *)wifi_config.sta.ssid,
+                             (const char *)wifi_config.sta.password);
+    } else {
+        printf("No saved WiFi settings. Configure via System menu or 'config'.\n");
     }
     for (;;) {
         char command[40];
@@ -312,16 +251,20 @@ void app_main(void)
         } else if (strcmp(command, "config") == 0) {
             /* 暂停刷屏但保留有效时间，重配网络时本地时钟仍继续走时。 */
             xEventGroupClearBits(clock_events, CLOCK_DISPLAY_BIT);
-            stop_wifi();
+            wifi_manager_stop();
             do {
                 if (!prompt_wifi_config(&wifi_config)) { break; }
-                if (connect_wifi(&wifi_config)) {
-                    save_wifi_config(&wifi_config);
+                if (wifi_manager_connect((const char *)wifi_config.sta.ssid,
+                                         (const char *)wifi_config.sta.password) != ESP_OK) {
+                    printf("WiFi connect request failed.\n");
+                    continue;
+                }
+                if (wifi_manager_wait_connected(30000)) {
                     synchronize_time();
                     break;
                 }
                 printf("WiFi connection failed. Try again.\n");
-                stop_wifi();
+                wifi_manager_stop();
             } while (true);
             xEventGroupSetBits(clock_events, CLOCK_DISPLAY_BIT);
         } else if (command[0] != '\0') {

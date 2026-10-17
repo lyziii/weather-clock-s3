@@ -223,7 +223,9 @@ esp_err_t display_port_init(lv_display_t **output, void (*create_pages)(lv_displ
     if (result != ESP_OK) { goto cleanup; }
     lvgl_port_cfg_t port_config = ESP_LVGL_PORT_INIT_CONFIG();
     port_config.task_priority = 3;
-    port_config.task_stack = 6144;
+    /* LVGL 任务栈需容纳全屏渲染与各二级页（含 WiFi 扫描结果列表）的对象创建；
+     * 6144 字节会在渲染 AP 列表时栈溢出，加大到 10 KB 留足余量。 */
+    port_config.task_stack = 10240;
     result = lvgl_port_init(&port_config);
     if (result != ESP_OK) { goto cleanup; }
     port_ready = true;

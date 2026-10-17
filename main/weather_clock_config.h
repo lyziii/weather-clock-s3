@@ -36,6 +36,7 @@
 
 /* 天气坐标独立于时区；默认北京，城市名使用英文以节省中文字库空间。 */
 #define WEATHER_CITY "BEIJING"
+#define WEATHER_CITY_ZH "北京"
 #define WEATHER_LATITUDE "39.9042"
 #define WEATHER_LONGITUDE "116.4074"
 #define WEATHER_REFRESH_SECONDS (15 * 60)
