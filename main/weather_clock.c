@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "freertos/FreeRTOS.h"
@@ -139,6 +140,7 @@ static void boot_finished(lv_timer_t *timer)
     lv_obj_delete(boot_overlay);
     boot_overlay = NULL;
     touch_controls_set_blocked(false);
+    ESP_LOGI(TAG, "Boot animation finished");
 }
 
 /* 顶层遮罩不改变已保存的目标页；冷启动和触摸深睡唤醒共用同一动画。 */
@@ -597,7 +599,9 @@ static void show_weather(const weather_data_t *weather, bool success)
 static void weather_task(void *argument)
 {
     for (;;) {
-        xEventGroupWaitBits(network_events, NETWORK_READY | TIME_READY,
+        /* 天气只需要网络；时间同步失败时仍应尝试 HTTP 回退，而不是
+         * 让界面永远停在 “Weather pending”。 */
+        xEventGroupWaitBits(network_events, NETWORK_READY,
                             pdFALSE, pdTRUE, portMAX_DELAY);
         weather_data_t weather = {0};
         esp_err_t result = weather_service_fetch(&weather);
@@ -662,6 +666,17 @@ esp_err_t weather_clock_init(void)
 bool weather_clock_command(const char *command)
 {
     if (strcmp(command, "sound test") == 0) { return touch_sound_test(); }
+    if (strcmp(command, "music start") == 0) { return touch_sound_music_start(); }
+    if (strcmp(command, "music stop") == 0) { touch_sound_music_stop(); return true; }
+    if (strncmp(command, "brightness ", 11) == 0) {
+        char *end = NULL;
+        unsigned long value = strtoul(command + 11, &end, 10);
+        if (end == command + 11 || *end != '\0' || value > 100) { return false; }
+        display_port_brightness_set((unsigned)value);
+        display_port_brightness_save();
+        printf("Brightness: %u%%\n", (unsigned)value);
+        return true;
+    }
     if (strcmp(command, "mag status") == 0) {
         board_hardware_snapshot_t hardware = {0};
         bool ready = board_hardware_snapshot(&hardware);

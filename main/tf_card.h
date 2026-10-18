@@ -41,6 +41,13 @@ bool tf_card_browse(const char *path, unsigned page);
 void tf_card_lock(void);
 void tf_card_unlock(void);
 
+/* 标记一段“外部整体读取”开始/结束（字库整体载入、WAV 播放）。
+ * 期间卡状态探测不会卸载 /tf，USB 切换也会直接返回失败，避免正在读的
+ * 文件被抽走；读取结束后下一轮探测仍会处理真正的拔卡。
+ * 内部使用计数，可嵌套或由多个读者同时持有。 */
+void tf_card_reader_begin(void);
+void tf_card_reader_end(void);
+
 /* USB MSC（U盘）支持：进入 USB 模式时暂停本地文件系统、卸载 VFS 并重新
  * 初始化一张卡给 USB 块设备；退出时释放 USB 卡并重新挂载 VFS。 */
 sdmmc_card_t *tf_card_enter_usb(void);

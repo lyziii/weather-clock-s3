@@ -165,10 +165,22 @@ static void time_sync_task(void *argument)
 {
     (void)argument;
     bool previous = false;
+    int retry_seconds = 0;
     for (;;) {
         bool connected = wifi_manager_connected();
-        if (connected && !previous) {
+        bool time_valid = (xEventGroupGetBits(clock_events) & TIME_VALID_BIT) != 0;
+        if (!connected) {
+            retry_seconds = 0;
+        } else if (!previous) {
+            /* 新连接建立后立即同步；失败则每 5 分钟重试，而不是只试一次。 */
             synchronize_time();
+            retry_seconds = 300;
+        } else if (!time_valid) {
+            if (retry_seconds > 0) { --retry_seconds; }
+            else {
+                synchronize_time();
+                retry_seconds = 300;
+            }
         }
         previous = connected;
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -239,7 +251,7 @@ void app_main(void)
     }
     for (;;) {
         char command[40];
-        printf("Commands: mode desk, mode ride, mode imu, ride start, ride pause, ride reset, status, power, config, sync\n");
+        printf("Commands: mode desk, mode ride, mode imu, ride start, ride pause, ride reset, status, power, config, sync, music start, music stop, brightness 10-100\n");
         if (!read_line(command, sizeof(command), false)) {
             printf("Command too long.\n");
         } else if (weather_clock_command(command)) {

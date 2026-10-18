@@ -1,29 +1,16 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
-#include "esp_lvgl_port.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "tinyusb.h"
 #include "tinyusb_default_config.h"
 #include "tinyusb_msc.h"
 #include "tf_card.h"
-#include "zh_font.h"
 #include "usb_msc.h"
 
 static const char *TAG = "usb_msc";
 static bool active;
 static tinyusb_msc_storage_handle_t storage;
-
-/* 进入 U 盘模式前释放字库：LVGL 的动态字形模式会一直持有字库文件句柄，
- * 句柄没关闭就卸载 /tf，后续取字形会落到已注销的磁盘驱动上。
- * LVGL 锁可递归获取，因此按钮回调（LVGL 任务内）调用也安全。 */
-static void release_fonts(void)
-{
-    if (lvgl_port_lock(1000)) {
-        zh_font_release();
-        lvgl_port_unlock();
-    }
-}
 
 /* 用与 USB 完全相同的方式读一个扇区，确认交出去的块设备真的可读。
  * 失败时立即把卡还给本地挂载，避免电脑只能看到一个打不开的盘。 */
@@ -48,7 +35,8 @@ static esp_err_t probe_medium(sdmmc_card_t *card)
 esp_err_t usb_msc_start(void)
 {
     if (active) { return ESP_OK; }
-    release_fonts();
+    /* 中文字库的字节已全部复制到 PSRAM，不持有 /tf 文件句柄，切换 U 盘
+     * 时无需销毁字体；只有文件浏览会暂时看不到本地卡。 */
     sdmmc_card_t *card = tf_card_enter_usb();
     if (!card) {
         ESP_LOGE(TAG, "TF card unavailable for USB (no card or volume still busy)");
@@ -144,7 +132,8 @@ esp_err_t usb_msc_stop(void)
         ESP_LOGW(TAG, "MSC driver uninstall failed: %s", esp_err_to_name(err));
     }
     active = false;
-    /* 归还 SDMMC 主机并重新挂载 /tf，恢复本地文件浏览；字库会在挂载后自动重载。 */
+    /* 归还 SDMMC 主机并重新挂载 /tf，恢复本地文件浏览；中文字库常驻
+     * PSRAM，重新挂载后无需重新读取字库。 */
     tf_card_exit_usb();
     ESP_LOGI(TAG, "USB MSC disabled: local TF mount restored, remove the disk from the PC first");
     return ESP_OK;

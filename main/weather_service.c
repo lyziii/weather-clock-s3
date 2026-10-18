@@ -1,5 +1,7 @@
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "cJSON.h"
@@ -43,11 +45,18 @@ const char *weather_service_description_zh(int code)
 esp_err_t weather_service_fetch(weather_data_t *weather)
 {
     if (!weather) { return ESP_ERR_INVALID_ARG; }
+    /* TLS 证书校验依赖正确的系统时间。SNTP 尚未成功时使用同一服务的
+     * HTTP 接口，天气不再被时间同步失败永久阻塞；时间有效后自动回到 HTTPS。 */
+    bool clock_valid = time(NULL) > 1700000000; /* 2023-11，排除 1970 默认值 */
+    char url[320];
+    snprintf(url, sizeof(url),
+             "%s://api.open-meteo.com/v1/forecast?latitude=" WEATHER_LATITUDE
+             "&longitude=" WEATHER_LONGITUDE
+             "&current=temperature_2m,relative_humidity_2m,weather_code&timezone=Asia%%2FShanghai",
+             clock_valid ? "https" : "http");
     const esp_http_client_config_t config = {
-        .url = "https://api.open-meteo.com/v1/forecast?latitude=" WEATHER_LATITUDE
-               "&longitude=" WEATHER_LONGITUDE
-               "&current=temperature_2m,relative_humidity_2m,weather_code&timezone=Asia%2FShanghai",
-        .crt_bundle_attach = esp_crt_bundle_attach,
+        .url = url,
+        .crt_bundle_attach = clock_valid ? esp_crt_bundle_attach : NULL,
         .timeout_ms = 10000, .buffer_size = 1024,
         .user_agent = "ESP32-WeatherClock/1.0",
     };

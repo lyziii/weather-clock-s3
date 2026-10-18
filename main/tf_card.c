@@ -12,7 +12,6 @@
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "tf_card.h"
-#include "zh_font.h"
 
 #define TF_MOUNT "/tf"
 
@@ -40,6 +39,34 @@ void tf_card_lock(void)
 void tf_card_unlock(void)
 {
     if (fs_mutex) { xSemaphoreGive(fs_mutex); }
+}
+
+/* 字库加载和音乐播放都会在别的任务里连续读多个块。用计数而不是布尔值，
+ * 允许多个读者重叠；计数非零期间后台任务不卸载、USB 不切换，保证每个
+ * 读者看到的是同一张挂载的卡。 */
+static portMUX_TYPE reader_lock = portMUX_INITIALIZER_UNLOCKED;
+static unsigned external_readers;
+
+void tf_card_reader_begin(void)
+{
+    taskENTER_CRITICAL(&reader_lock);
+    ++external_readers;
+    taskEXIT_CRITICAL(&reader_lock);
+}
+
+void tf_card_reader_end(void)
+{
+    taskENTER_CRITICAL(&reader_lock);
+    if (external_readers) { --external_readers; }
+    taskEXIT_CRITICAL(&reader_lock);
+}
+
+static bool reader_active(void)
+{
+    taskENTER_CRITICAL(&reader_lock);
+    bool active = external_readers != 0;
+    taskEXIT_CRITICAL(&reader_lock);
+    return active;
 }
 
 static void publish(void)
@@ -171,13 +198,12 @@ static void card_task(void *argument)
             if (!usb_mode && card) { read_directory(&request); }
             tf_card_unlock();
         }
-        /* 卡座没有独立检测引脚，用卡状态命令探测拔出，失败后释放挂载并重试。 */
+        /* 卡座没有独立检测引脚，用卡状态命令探测拔出，失败后释放挂载并重试。
+         * 中文字库已整体载入 PSRAM，不再持有这里打开的文件，因此卸载 /tf
+         * 不会影响已显示的中文；重插卡后只需重新挂载供文件浏览使用。
+         * 字库正在整体读取时先不卸载，否则读一半的文件会被抽走。 */
         tf_card_lock();
-        if (!usb_mode && card && sdmmc_get_status(card) != ESP_OK) {
-            /* 字库仍持有字库文件：先挂释放标记（不能在此等 LVGL 锁，
-             * 否则与 fs_open 的 LVGL→tf_card 顺序互锁），再由 LVGL 任务
-             * 关闭句柄，重插卡后即可重新加载。 */
-            zh_font_invalidate();
+        if (!usb_mode && card && !reader_active() && sdmmc_get_status(card) != ESP_OK) {
             esp_vfs_fat_sdcard_unmount(TF_MOUNT, card);
             card = NULL;
             working = (tf_snapshot_t){.error = ESP_ERR_NOT_FOUND, .path = "/"};
@@ -192,10 +218,18 @@ sdmmc_card_t *tf_card_enter_usb(void)
     if (usb_mode || !card) { return NULL; }
     usb_mode = true;
 
-    /* 取锁会等待后台任务完成当前目录读取，避免在 FatFs 操作中途卸载。
-     * esp_vfs_fat_sdcard_unmount 会释放 card 结构，因此立即清空本地指针。 */
+    /* 字库正在整体载入时不允许切走卡；调用方稍后重试即可。
+     * 置位 usb_mode 后再取锁复查，确保不会在检查与卸载之间开始一次字库读取。 */
     tf_card_lock();
-    /* 先标记为未挂载：切换期间界面与字库都不要再访问 /tf。 */
+    if (reader_active()) {
+        usb_mode = false;
+        tf_card_unlock();
+        return NULL;
+    }
+
+    /* 取锁会等待后台任务完成当前目录读取，避免在 FatFs 操作中途卸载。
+     * 先标记为未挂载：切换期间界面与字库都不要再访问 /tf。
+     * esp_vfs_fat_sdcard_unmount 会释放 card 结构，因此立即清空本地指针。 */
     working.mounted = false;
     publish();
     esp_err_t umount_err = esp_vfs_fat_sdcard_unmount(TF_MOUNT, card);

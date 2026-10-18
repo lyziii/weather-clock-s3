@@ -4,7 +4,10 @@
 #include "esp_timer.h"
 #include "board_hardware.h"
 #include "hardware_config.h"
+#include "weather_clock_config.h"
 #include "imu_view.h"
+#include "display_port.h"
+#include "touch_sound.h"
 #include "entertainment_view.h"
 #include "tf_card.h"
 #include "wifi_view.h"
@@ -46,6 +49,8 @@ static lv_obj_t *previous_button;
 static lv_obj_t *next_button;
 static lv_obj_t *up_button;
 static lv_obj_t *music_status;
+static lv_obj_t *brightness_slider;
+static lv_obj_t *brightness_value;
 static lv_obj_t *file_detail;
 static tf_snapshot_t snapshot;
 static tf_snapshot_t incoming;
@@ -131,6 +136,34 @@ static void show_child(unsigned destination)
 static void navigate(lv_event_t *event)
 {
     show_child((unsigned)(uintptr_t)lv_event_get_user_data(event));
+}
+
+static void music_play_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (!touch_sound_music_start()) {
+        lv_label_set_text(music_status, "Audio unavailable");
+    }
+}
+
+static void music_stop_clicked(lv_event_t *event)
+{
+    (void)event;
+    touch_sound_music_stop();
+}
+
+static void brightness_changed(lv_event_t *event)
+{
+    lv_obj_t *slider = lv_event_get_target(event);
+    unsigned value = (unsigned)lv_slider_get_value(slider);
+    display_port_brightness_set(value);
+    if (brightness_value) { lv_label_set_text_fmt(brightness_value, "%u%%", value); }
+}
+
+static void brightness_released(lv_event_t *event)
+{
+    (void)event;
+    display_port_brightness_save();
 }
 
 /* USB 磁盘模式：点击进入/退出，让电脑直接读写 TF 卡。 */
@@ -317,10 +350,15 @@ static void refresh(lv_timer_t *timer)
     zh_font_tick();
     const lv_font_t *font = zh_font();
     if (font) { lv_obj_set_style_text_font(file_detail, font, 0); }
-    if (!tf_card_snapshot(&incoming) || incoming.revision == rendered_revision) { return; }
+    if (!tf_card_snapshot(&incoming)) { return; }
+    char audio_status[96];
+    bool audio_ready = touch_sound_music_status(audio_status, sizeof(audio_status));
+    lv_label_set_text_fmt(music_status, "%s\n%s",
+                          incoming.mounted ? "TF card ready" : "TF card unavailable",
+                          audio_ready ? audio_status : "Audio unavailable");
+    if (incoming.revision == rendered_revision) { return; }
     snapshot = incoming;
     rendered_revision = snapshot.revision;
-    lv_label_set_text(music_status, snapshot.mounted ? "TF card ready" : "TF card unavailable");
     if (!snapshot.mounted) {
         lv_label_set_text_fmt(capacity_label, "TF unavailable\n%s", esp_err_to_name(snapshot.error));
     } else if (!snapshot.capacity_valid) {
@@ -395,15 +433,36 @@ lv_obj_t *entertainment_view_create(void)
     button(home, LV_SYMBOL_GPS "  GPS", 14, 248, 212, 52, navigate, (void *)5);
     button(home, LV_SYMBOL_WIFI "  WiFi", 14, 308, 212, 52, navigate, (void *)6);
     button(home, LV_SYMBOL_SD_CARD "  USB Disk", 14, 368, 212, 52, usb_clicked, NULL);
+    make_label(home, LV_SYMBOL_SETTINGS "  Brightness", 20, 430, 202,
+                &lv_font_montserrat_12, 0x8CE2BE);
+    brightness_slider = lv_slider_create(home);
+    lv_obj_set_pos(brightness_slider, 20, 454);
+    lv_obj_set_size(brightness_slider, 160, 18);
+    lv_slider_set_range(brightness_slider, LCD_BACKLIGHT_MIN_PERCENT, 100);
+    lv_slider_set_value(brightness_slider, display_port_brightness_get(), LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(brightness_slider, lv_color_hex(0x283B36), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(brightness_slider, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(brightness_slider, lv_color_hex(0x8CE2BE), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(brightness_slider, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(brightness_slider, lv_color_hex(0xFFFFFF), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(brightness_slider, 2, LV_PART_KNOB);
+    brightness_value = make_label(home, "", 190, 450, 42, &lv_font_montserrat_12, 0xFFFFFF);
+    lv_label_set_text_fmt(brightness_value, "%u%%", display_port_brightness_get());
+    lv_obj_add_event_cb(brightness_slider, brightness_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(brightness_slider, brightness_released, LV_EVENT_RELEASED, NULL);
     /* 视频暂不提供可点击入口，避免让未实现的功能看起来可用。 */
-    make_label(home, LV_SYMBOL_VIDEO "  Video - unavailable", 20, 428, 202,
+    make_label(home, LV_SYMBOL_VIDEO "  Video - unavailable", 20, 492, 202,
                 &lv_font_montserrat_12, 0x8CA49B);
     music = content();
-    make_label(music, LV_SYMBOL_AUDIO, 92, 36, 56, &lv_font_montserrat_28, 0x8CE2BE);
-    make_label(music, "MUSIC", 20, 96, 200, &lv_font_montserrat_28, 0xFFFFFF);
-    make_label(music, "Playback unavailable", 20, 142, 200, &lv_font_montserrat_12, 0x8CA49B);
-    music_status = make_label(music, "Checking TF card...", 20, 176, 200,
+    make_label(music, LV_SYMBOL_AUDIO, 92, 8, 56, &lv_font_montserrat_28, 0x8CE2BE);
+    make_label(music, "MUSIC", 20, 48, 200, &lv_font_montserrat_28, 0xFFFFFF);
+    make_label(music, "Plays /tf/music/*.wav or built-in melody", 20, 92, 200,
+                &lv_font_montserrat_12, 0x8CA49B);
+    music_status = make_label(music, "Checking TF card...", 20, 118, 200,
                                &lv_font_montserrat_12, 0x8CE2BE);
+    lv_obj_set_height(music_status, 36);
+    button(music, LV_SYMBOL_PLAY "  Play music", 20, 162, 200, 42, music_play_clicked, NULL);
+    button(music, LV_SYMBOL_STOP "  Stop", 20, 210, 200, 36, music_stop_clicked, NULL);
     storage = content();
     capacity_label = make_label(storage, "Checking TF card...", 14, 6, 212,
                                  &lv_font_montserrat_12, 0xFFFFFF);

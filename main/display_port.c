@@ -2,7 +2,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "driver/spi_master.h"
+#include "nvs.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_vendor.h"
@@ -24,6 +26,8 @@ static esp_lcd_panel_io_handle_t touch_io;
 static esp_lcd_touch_handle_t touch_handle;
 static lv_indev_t *touch_input;
 static esp_lcd_panel_handle_t active_panel;
+static bool backlight_pwm;
+static unsigned backlight_percent = LCD_BACKLIGHT_DEFAULT_PERCENT;
 static const char *touch_stage = "OFF";
 static char touch_diagnostic[24] = "NO INPUT";
 static uint8_t touch_vendor_id;
@@ -161,6 +165,57 @@ touch_cleanup:
 }
 
 /* 此文件独占屏幕总线和外设资源；更换开发板时优先替换本适配层。 */
+/* 只写硬件，不改缓存；休眠时写 0 不能覆盖用户保存的亮度。 */
+static void backlight_write(unsigned percent)
+{
+    if (percent > 100) { percent = 100; }
+    if (LCD_PIN_BL < 0) { return; }
+    uint32_t level = ((uint32_t)percent * 1023u + 50u) / 100u;
+    uint32_t duty = LCD_BACKLIGHT_ON_LEVEL ? level : (1023u - level);
+    if (backlight_pwm) {
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
+        ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+    } else {
+        gpio_set_level(LCD_PIN_BL, percent ? LCD_BACKLIGHT_ON_LEVEL : !LCD_BACKLIGHT_ON_LEVEL);
+    }
+}
+
+void display_port_brightness_set(unsigned percent)
+{
+    if (percent < LCD_BACKLIGHT_MIN_PERCENT) { percent = LCD_BACKLIGHT_MIN_PERCENT; }
+    backlight_percent = percent;
+    backlight_write(percent);
+}
+
+unsigned display_port_brightness_get(void)
+{
+    return backlight_percent;
+}
+
+void display_port_brightness_save(void)
+{
+    nvs_handle_t storage;
+    if (nvs_open("device_ui", NVS_READWRITE, &storage) != ESP_OK) { return; }
+    nvs_set_u8(storage, "brightness", (uint8_t)backlight_percent);
+    nvs_commit(storage);
+    nvs_close(storage);
+}
+
+static unsigned brightness_load(void)
+{
+    nvs_handle_t storage;
+    uint8_t value = LCD_BACKLIGHT_DEFAULT_PERCENT;
+    if (nvs_open("device_ui", NVS_READONLY, &storage) == ESP_OK) {
+        nvs_get_u8(storage, "brightness", &value);
+        nvs_close(storage);
+    }
+    if (value < LCD_BACKLIGHT_MIN_PERCENT || value > 100) {
+        value = LCD_BACKLIGHT_DEFAULT_PERCENT;
+    }
+    return value;
+}
+
+
 esp_err_t display_port_init(lv_display_t **output, void (*create_pages)(lv_display_t *display))
 {
     if (!output || !create_pages) { return ESP_ERR_INVALID_ARG; }
@@ -184,6 +239,30 @@ esp_err_t display_port_init(lv_display_t **output, void (*create_pages)(lv_displ
         result = gpio_set_direction(LCD_PIN_BL, GPIO_MODE_OUTPUT);
         if (result != ESP_OK) { return result; }
         gpio_set_level(LCD_PIN_BL, !LCD_BACKLIGHT_ON_LEVEL);
+        const ledc_timer_config_t timer_config = {
+            .speed_mode = LEDC_LOW_SPEED_MODE,
+            .duty_resolution = LCD_BACKLIGHT_PWM_RESOLUTION,
+            .timer_num = LEDC_TIMER_0,
+            .freq_hz = LCD_BACKLIGHT_PWM_HZ,
+            .clk_cfg = LEDC_AUTO_CLK,
+        };
+        const ledc_channel_config_t channel_config = {
+            .gpio_num = LCD_PIN_BL,
+            .speed_mode = LEDC_LOW_SPEED_MODE,
+            .channel = LEDC_CHANNEL_0,
+            .intr_type = LEDC_INTR_DISABLE,
+            .timer_sel = LEDC_TIMER_0,
+            .duty = 0,
+            .hpoint = 0,
+        };
+        if (ledc_timer_config(&timer_config) == ESP_OK &&
+            ledc_channel_config(&channel_config) == ESP_OK) {
+            backlight_pwm = true;
+        } else {
+            ESP_LOGW(TAG, "Backlight PWM unavailable; using GPIO on/off");
+        }
+        backlight_percent = brightness_load();
+        backlight_write(0);
     }
     spi_bus_config_t bus = {
         .sclk_io_num = LCD_PIN_SCLK, .mosi_io_num = LCD_PIN_MOSI,
@@ -266,7 +345,11 @@ esp_err_t display_port_init(lv_display_t **output, void (*create_pages)(lv_displ
     lvgl_port_unlock();
     result = esp_lcd_panel_disp_on_off(panel, true);
     if (result != ESP_OK) { goto cleanup; }
-    if (LCD_PIN_BL >= 0) { gpio_set_level(LCD_PIN_BL, LCD_BACKLIGHT_ON_LEVEL); }
+    if (LCD_PIN_BL >= 0) {
+        backlight_write(backlight_percent);
+        ESP_LOGI(TAG, "LCD backlight on at %u%% (%s)", backlight_percent,
+                 backlight_pwm ? "PWM" : "GPIO");
+    }
     ESP_LOGI(TAG, "LCD stage: display initialization complete");
     return ESP_OK;
 
@@ -291,7 +374,7 @@ void display_port_prepare_sleep(void)
     if (lvgl_port_lock(1000)) {
         esp_lcd_panel_disp_on_off(active_panel, false);
         esp_lcd_panel_disp_sleep(active_panel, true);
-        if (LCD_PIN_BL >= 0) { gpio_set_level(LCD_PIN_BL, !LCD_BACKLIGHT_ON_LEVEL); }
+        if (LCD_PIN_BL >= 0) { backlight_write(0); }
         lvgl_port_unlock();
     }
     /* 释放触摸中断锁存，避免刚进入深睡就被仍为低电平的 INT 再次唤醒。 */

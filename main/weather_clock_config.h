@@ -23,6 +23,12 @@
 /* 板载背光高电平开启；45/46 的启动电平由硬件保证。 */
 #define LCD_PIN_BL   45
 #define LCD_BACKLIGHT_ON_LEVEL 1
+/* 背光使用 LEDC PWM 而不是单纯 GPIO 开关，系统页可在 10~100% 间调节。
+ * 5 kHz 高于可见闪烁范围，10 位分辨率足够平滑。 */
+#define LCD_BACKLIGHT_PWM_HZ 5000
+#define LCD_BACKLIGHT_PWM_RESOLUTION 10
+#define LCD_BACKLIGHT_DEFAULT_PERCENT 100
+#define LCD_BACKLIGHT_MIN_PERCENT 10
 #define LCD_SPI_CLOCK_HZ (40 * 1000 * 1000)
 
 /* RGB565 全帧在 40 MHz 下约需 31 ms；须实机核对信号完整性及花屏情况。 */
