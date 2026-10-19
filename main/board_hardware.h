@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "driver/i2c_master.h"
 #include "esp_err.h"
@@ -55,6 +56,18 @@ typedef struct {
     bool magnetic_valid;
     int64_t magnetic_us;
     float magnetic_gauss[3];
+    bool gnss_uart_ready;
+    esp_err_t gnss_uart_result;
+    uint32_t gnss_rx_bytes;
+    uint32_t gnss_tx_bytes;
+    int64_t gnss_rx_us;
+    uint32_t gnss_valid_sentences;
+    uint32_t gnss_checksum_errors;
+    uint32_t gnss_format_errors;
+    uint32_t gnss_parse_errors;
+    bool gnss_stream_active;
+    char gnss_last_sentence[6];
+    unsigned gnss_fix_quality;
     bool gnss_valid;
     int64_t gnss_us;
     double latitude;
@@ -70,3 +83,5 @@ typedef struct {
 esp_err_t board_hardware_init(void);
 bool board_hardware_snapshot(board_hardware_snapshot_t *snapshot);
 i2c_master_bus_handle_t board_hardware_i2c_bus(void);
+/* GNSS 发包统一经此接口，保证页面发送计数反映实际 UART 写入量。 */
+esp_err_t board_hardware_gnss_write(const void *data, size_t size);

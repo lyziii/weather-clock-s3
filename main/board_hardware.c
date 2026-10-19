@@ -26,6 +26,16 @@ static esp_err_t initialization_result = ESP_ERR_INVALID_STATE;
 static bool imu_probe_done;
 static uint8_t imu_ack_mask;
 static esp_err_t initialize_magnetometer(board_hardware_snapshot_t *sample);
+static bool gnss_filter_ready;
+static double gnss_filtered_latitude;
+static double gnss_filtered_longitude;
+static float gnss_filtered_speed;
+
+static float filter_weight(float elapsed, float time_constant)
+{
+    if (elapsed <= 0 || time_constant <= 0) { return 1; }
+    return 1.0f - expf(-fminf(elapsed, 2.0f) / time_constant);
+}
 
 static esp_err_t magnetic_read(uint8_t reg, void *data, size_t size)
 {
@@ -52,16 +62,28 @@ static void sample_magnetic(board_hardware_snapshot_t *sample)
     if (status & 0x01) {
         sample->magnetic_read_result = magnetic_read(0x00, raw, sizeof(raw));
         if (sample->magnetic_read_result == ESP_OK) {
+            static float filtered_gauss[3];
+            static bool filter_ready;
+            static int64_t previous_us;
             uint32_t axes[] = {
                 ((uint32_t)raw[0] << 10) | ((uint32_t)raw[1] << 2) | (raw[6] >> 6),
                 ((uint32_t)raw[2] << 10) | ((uint32_t)raw[3] << 2) | ((raw[6] >> 4) & 3),
                 ((uint32_t)raw[4] << 10) | ((uint32_t)raw[5] << 2) | ((raw[6] >> 2) & 3),
             };
+            int64_t sample_us = esp_timer_get_time();
+            float elapsed = previous_us ? (sample_us - previous_us) / 1000000.0f : 0;
+            float weight = filter_ready && elapsed > 0 && elapsed <= 1.0f ?
+                filter_weight(elapsed, HW_MAG_FILTER_TAU_S) : 1.0f;
             for (unsigned axis = 0; axis < 3; ++axis) {
-                sample->magnetic_gauss[axis] = ((int32_t)axes[axis] - 131072) / 32768.0f;
+                float raw_gauss = ((int32_t)axes[axis] - 131072) / 32768.0f;
+                if (weight >= 1.0f) { filtered_gauss[axis] = raw_gauss; }
+                else { filtered_gauss[axis] += weight * (raw_gauss - filtered_gauss[axis]); }
+                sample->magnetic_gauss[axis] = filtered_gauss[axis];
             }
+            previous_us = sample_us;
+            filter_ready = true;
             sample->magnetic_valid = true;
-            sample->magnetic_us = esp_timer_get_time();
+            sample->magnetic_us = sample_us;
         } else { sample->magnetic_valid = false; }
     }
     /* 自动 SET/RESET 后触发单次测量，下个采样周期再检查完成位。 */
@@ -262,14 +284,29 @@ static bool coordinate(const nmea_position *position, double limit, double *valu
 
 static void parse_gnss(char *line, size_t size, board_hardware_snapshot_t *sample)
 {
-    if (nmea_has_checksum(line, size) != 0 || nmea_validate(line, size, 1) != 0) { return; }
+    if (size >= 6 && line[0] == '$') {
+        memcpy(sample->gnss_last_sentence, line + 1, 5);
+        sample->gnss_last_sentence[5] = '\0';
+    }
+    int validation = nmea_validate(line, size, 1);
+    if (validation != 0) {
+        if (nmea_has_checksum(line, size) == 0) { ++sample->gnss_checksum_errors; }
+        else { ++sample->gnss_format_errors; }
+        return;
+    }
+    ++sample->gnss_valid_sentences;
     /* 先验证原文校验和，再统一 GP/GN/BD 等 talker，仅解析 RMC/GGA 的字段。 */
     line[1] = 'G';
     line[2] = 'P';
     nmea_s *message = nmea_parse(line, size, 0);
-    if (!message) { return; }
+    if (!message) {
+        if (!strcmp(sample->gnss_last_sentence + 2, "RMC") ||
+            !strcmp(sample->gnss_last_sentence + 2, "GGA")) { ++sample->gnss_parse_errors; }
+        return;
+    }
     if (message->errors != 0) {
-        if (message->type == NMEA_GPRMC) { sample->gnss_valid = false; }
+        ++sample->gnss_parse_errors;
+        if (message->type == NMEA_GPRMC) { sample->gnss_valid = false; gnss_filter_ready = false; }
         if (message->type == NMEA_GPGGA) { sample->altitude_valid = false; }
     } else if (message->type == NMEA_GPRMC) {
         nmea_gprmc_s *rmc = (nmea_gprmc_s *)message;
@@ -279,18 +316,40 @@ static void parse_gnss(char *line, size_t size, board_hardware_snapshot_t *sampl
         sample->gnss_valid = rmc->valid && isfinite(speed) && speed >= 0 && speed <= 200 &&
             coordinate(&rmc->latitude, 90, &latitude) && coordinate(&rmc->longitude, 180, &longitude);
         if (sample->gnss_valid) {
-            sample->latitude = latitude;
-            sample->longitude = longitude;
-            sample->speed_kmh = speed;
-            sample->gnss_us = esp_timer_get_time();
+            int64_t sample_us = esp_timer_get_time();
+            float elapsed = gnss_filter_ready && sample->gnss_us ?
+                (sample_us - sample->gnss_us) / 1000000.0f : 0;
+            float weight = gnss_filter_ready && elapsed > 0 && elapsed <= 5.0f ?
+                filter_weight(elapsed, HW_GNSS_FILTER_TAU_S) : 1.0f;
+            if (weight >= 1.0f) {
+                gnss_filtered_latitude = latitude;
+                gnss_filtered_longitude = longitude;
+                gnss_filtered_speed = speed;
+            } else {
+                gnss_filtered_latitude += weight * (latitude - gnss_filtered_latitude);
+                gnss_filtered_longitude += weight * (longitude - gnss_filtered_longitude);
+                gnss_filtered_speed += weight * (speed - gnss_filtered_speed);
+            }
+            gnss_filter_ready = true;
+            sample->latitude = gnss_filtered_latitude;
+            sample->longitude = gnss_filtered_longitude;
+            sample->speed_kmh = gnss_filtered_speed;
+            sample->gnss_us = sample_us;
+        } else {
+            gnss_filter_ready = false;
         }
     } else if (message->type == NMEA_GPGGA) {
         nmea_gpgga_s *gga = (nmea_gpgga_s *)message;
+        sample->gnss_fix_quality = gga->position_fix > 0 ? (unsigned)gga->position_fix : 0;
         sample->altitude_valid = gga->position_fix != 0 && gga->altitude_unit == 'M' &&
             isfinite(gga->altitude) && gga->altitude >= -1500 && gga->altitude <= 20000;
         if (sample->altitude_valid) {
-            sample->altitude_m = gga->altitude;
-            sample->altitude_us = esp_timer_get_time();
+            int64_t sample_us = esp_timer_get_time();
+            float elapsed = sample->altitude_us ? (sample_us - sample->altitude_us) / 1000000.0f : 0;
+            float weight = elapsed > 0 && elapsed <= 5.0f ?
+                filter_weight(elapsed, HW_GNSS_ALT_FILTER_TAU_S) : 1.0f;
+            sample->altitude_m += weight * (gga->altitude - sample->altitude_m);
+            sample->altitude_us = sample_us;
         }
         sample->satellites = gga->n_satellites > 0 ? (unsigned)gga->n_satellites : 0;
         if (gga->position_fix == 0) { sample->gnss_valid = false; }
@@ -304,13 +363,24 @@ static void sample_gnss(board_hardware_snapshot_t *sample)
     static size_t used;
     uint8_t bytes[256];
     int count = uart_read_bytes(HW_GNSS_UART, bytes, sizeof(bytes), 0);
+    if (count > 0) {
+        sample->gnss_rx_bytes += (uint32_t)count;
+        sample->gnss_rx_us = esp_timer_get_time();
+    }
     for (int index = 0; index < count; ++index) {
         char character = (char)bytes[index];
         if (character == '$') { used = 0; }
         if (used == 0 && character != '$') { continue; }
-        if (used >= NMEA_MAX_LENGTH) { used = 0; continue; }
+        if (used >= NMEA_MAX_LENGTH) { used = 0; ++sample->gnss_format_errors; continue; }
         line[used++] = character;
         if (character == '\n') {
+            /* libnmea 要求 CRLF；部分接收器只输出 LF，在校验前补齐行尾。 */
+            if (used >= 2 && line[used - 2] != '\r') {
+                if (used >= NMEA_MAX_LENGTH) { used = 0; ++sample->gnss_format_errors; continue; }
+                memmove(line + used, line + used - 1, 1);
+                line[used - 1] = '\r';
+                ++used;
+            }
             line[used] = '\0';
             parse_gnss(line, used, sample);
             used = 0;
@@ -321,6 +391,10 @@ static void sample_gnss(board_hardware_snapshot_t *sample)
 static void hardware_task(void *argument)
 {
     board_hardware_snapshot_t sample = latest;
+    float filtered_acceleration[3] = {0};
+    float filtered_gyro[3] = {0};
+    bool imu_filter_ready = false;
+    int64_t imu_filter_us = 0;
     int64_t next_magnetic_retry = esp_timer_get_time() + 5000000;
     for (;;) {
         if (imu) {
@@ -331,14 +405,38 @@ static void hardware_task(void *argument)
             sample.imu_read_result = mpu6050_get_motion(imu, &gyro, &acceleration, &temperature);
             sample.imu_valid = sample.imu_read_result == ESP_OK;
             if (sample.imu_valid) {
-                sample.acceleration_g[0] = acceleration.x_axis;
-                sample.acceleration_g[1] = acceleration.y_axis;
-                sample.acceleration_g[2] = acceleration.z_axis;
-                sample.gyro_dps[0] = gyro.x_axis;
-                sample.gyro_dps[1] = gyro.y_axis;
-                sample.gyro_dps[2] = gyro.z_axis;
-                sample.imu_us = esp_timer_get_time();
+                float raw_acceleration[3] = {acceleration.x_axis, acceleration.y_axis, acceleration.z_axis};
+                float raw_gyro[3] = {gyro.x_axis, gyro.y_axis, gyro.z_axis};
+                int64_t sample_us = esp_timer_get_time();
+                float elapsed = imu_filter_us ? (sample_us - imu_filter_us) / 1000000.0f : 0;
+                if (!imu_filter_ready || elapsed <= 0 || elapsed > 0.5f) {
+                    imu_filter_ready = false;
+                }
+                float acceleration_weight = imu_filter_ready ?
+                    filter_weight(elapsed, HW_IMU_ACCEL_FILTER_TAU_S) : 1.0f;
+                float gyro_weight = imu_filter_ready ?
+                    filter_weight(elapsed, HW_IMU_GYRO_FILTER_TAU_S) : 1.0f;
+                for (unsigned axis = 0; axis < 3; ++axis) {
+                    if (isfinite(raw_acceleration[axis]) && isfinite(raw_gyro[axis])) {
+                        if (acceleration_weight >= 1.0f) { filtered_acceleration[axis] = raw_acceleration[axis]; }
+                        else { filtered_acceleration[axis] += acceleration_weight * (raw_acceleration[axis] - filtered_acceleration[axis]); }
+                        if (gyro_weight >= 1.0f) { filtered_gyro[axis] = raw_gyro[axis]; }
+                        else { filtered_gyro[axis] += gyro_weight * (raw_gyro[axis] - filtered_gyro[axis]); }
+                    } else { sample.imu_valid = false; }
+                }
+                if (sample.imu_valid) {
+                    memcpy(sample.acceleration_g, filtered_acceleration, sizeof(filtered_acceleration));
+                    memcpy(sample.gyro_dps, filtered_gyro, sizeof(filtered_gyro));
+                    sample.imu_us = sample_us;
+                    imu_filter_us = sample_us;
+                    imu_filter_ready = true;
+                } else {
+                    imu_filter_ready = false;
+                    sample.imu_read_result = ESP_ERR_INVALID_RESPONSE;
+                }
             } else {
+                imu_filter_ready = false;
+                imu_filter_us = 0;
                 sample.rotation_valid = false;
                 sample.placement = BOARD_PLACEMENT_UNKNOWN;
             }
@@ -355,6 +453,7 @@ static void hardware_task(void *argument)
         if (magnetometer) { sample_magnetic(&sample); }
         if (gnss_uart_installed) { sample_gnss(&sample); }
         if (xSemaphoreTake(snapshot_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+            sample.gnss_tx_bytes = latest.gnss_tx_bytes;
             latest = sample;
             xSemaphoreGive(snapshot_mutex);
         }
@@ -508,8 +607,13 @@ static esp_err_t initialize_hardware(void)
         }
         if (result == ESP_OK) { result = uart_driver_install(HW_GNSS_UART, 2048, 0, 0, NULL, 0); }
         gnss_uart_installed = result == ESP_OK;
+        latest.gnss_uart_ready = gnss_uart_installed;
+        latest.gnss_uart_result = result;
         if (!gnss_uart_installed) {
             ESP_LOGW("board_hardware", "GNSS UART unavailable: %s", esp_err_to_name(result));
+        } else {
+            ESP_LOGI("board_hardware", "GNSS UART%d ready: RX=%d TX=%d baud=%d",
+                     HW_GNSS_UART, HW_GNSS_RX, HW_GNSS_TX, HW_GNSS_BAUD);
         }
     }
     if ((imu || magnetometer || gnss_uart_installed || (HW_MMC5983_ENABLED && i2c_bus)) &&
@@ -544,6 +648,7 @@ bool board_hardware_snapshot(board_hardware_snapshot_t *snapshot)
     snapshot->imu_read_result = ESP_ERR_INVALID_STATE;
     snapshot->imu_probe_done = imu_probe_done;
     snapshot->imu_ack_mask = imu_ack_mask;
+    int64_t now = esp_timer_get_time();
     if (!snapshot_mutex || xSemaphoreTake(snapshot_mutex, pdMS_TO_TICKS(20)) != pdTRUE) { return false; }
     *snapshot = latest;
     xSemaphoreGive(snapshot_mutex);
@@ -552,9 +657,15 @@ bool board_hardware_snapshot(board_hardware_snapshot_t *snapshot)
     if (!snapshot->imu_us && snapshot->imu_read_result == ESP_OK) {
         snapshot->imu_read_result = ESP_ERR_INVALID_STATE;
     }
+    snapshot->gnss_uart_ready = gnss_uart_installed;
+    snapshot->gnss_stream_active = gnss_uart_installed && snapshot->gnss_rx_us &&
+                                   now - snapshot->gnss_rx_us <= 2000000;
+    if (gnss_uart_installed && snapshot->gnss_rx_us && !snapshot->gnss_stream_active) {
+        /* 保留累计字节和 NMEA 诊断，只让 GPS 页提示当前数据流中断。 */
+        snapshot->gnss_valid = false;
+    }
     snapshot->imu_probe_done = imu_probe_done;
     snapshot->imu_ack_mask = imu_ack_mask;
-    int64_t now = esp_timer_get_time();
     if (now - snapshot->imu_us > 500000) {
         snapshot->imu_valid = false;
         snapshot->attitude_valid = false;
@@ -572,4 +683,17 @@ bool board_hardware_snapshot(board_hardware_snapshot_t *snapshot)
 i2c_master_bus_handle_t board_hardware_i2c_bus(void)
 {
     return i2c_bus;
+}
+
+esp_err_t board_hardware_gnss_write(const void *data, size_t size)
+{
+    if (!gnss_uart_installed) { return ESP_ERR_INVALID_STATE; }
+    if (!data || size == 0) { return ESP_ERR_INVALID_ARG; }
+    int written = uart_write_bytes(HW_GNSS_UART, data, size);
+    if (written < 0) { return ESP_FAIL; }
+    if (snapshot_mutex && xSemaphoreTake(snapshot_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        latest.gnss_tx_bytes += (uint32_t)written;
+        xSemaphoreGive(snapshot_mutex);
+    }
+    return (size_t)written == size ? ESP_OK : ESP_ERR_INVALID_SIZE;
 }

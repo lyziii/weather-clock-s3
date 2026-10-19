@@ -30,9 +30,15 @@ static lv_obj_t *magnetic_strength;
 static lv_obj_t *magnetic_age;
 static lv_obj_t *compass_dial;
 static lv_obj_t *compass_heading_label;
+static lv_obj_t *compass_cardinal_labels[4];
+static lv_obj_t *compass_degree_labels[12];
 static lv_obj_t *magnetic_diagnostic;
 static float compass_heading;
 static bool compass_valid;
+static int64_t compass_last_imu_us;
+static int64_t compass_last_magnetic_us;
+static float compass_filtered_magnetic_heading;
+static bool compass_magnetic_filter_valid;
 static lv_obj_t *gps_state;
 static lv_obj_t *gps_satellites;
 static lv_obj_t *gps_latitude;
@@ -40,6 +46,12 @@ static lv_obj_t *gps_longitude;
 static lv_obj_t *gps_speed;
 static lv_obj_t *gps_altitude;
 static lv_obj_t *gps_age;
+static lv_obj_t *gps_uart_info;
+static lv_obj_t *gps_stream_info;
+static lv_obj_t *gps_sentence_info;
+static lv_obj_t *gps_error_info;
+static lv_obj_t *gps_hint;
+static const lv_font_t *gps_applied_font;
 static lv_obj_t *back_button;
 static lv_obj_t *capacity_label;
 static lv_obj_t *path_label;
@@ -219,7 +231,7 @@ static void set_enabled(lv_obj_t *object, bool enabled)
     else { lv_obj_add_state(object, LV_STATE_DISABLED); }
 }
 
-/* 指针表示磁北相对屏幕上沿的位置；无有效航向时不绘制指北针。 */
+/* 固定顶部指示标记，刻度环按当前航向反向旋转，使数字读数与指针对齐。 */
 static void draw_compass(lv_event_t *event)
 {
     lv_area_t area;
@@ -230,34 +242,64 @@ static void draw_compass(lv_event_t *event)
     lv_draw_line_dsc_t line;
     lv_draw_line_dsc_init(&line);
     line.width = 1;
-    for (unsigned tick = 0; tick < 24; ++tick) {
-        float angle = tick * (6.2831853f / 24);
-        float inner_radius = tick % 6 == 0 ? 63 : 69;
-        line.color = lv_color_hex(tick % 6 == 0 ? 0x8CE2BE : 0x526B61);
+    float heading_offset = compass_valid ? compass_heading : 0;
+    for (unsigned tick = 0; tick < 72; ++tick) {
+        float angle = (tick * 5.0f - heading_offset) * (3.14159265f / 180.0f);
+        bool major = tick % 6 == 0;
+        float inner_radius = major ? 63 : (tick % 2 == 0 ? 67 : 70);
+        line.color = lv_color_hex(major ? 0x8CE2BE : 0x526B61);
         line.p1 = (lv_point_precise_t){center_x + sinf(angle) * inner_radius,
                                      center_y - cosf(angle) * inner_radius};
         line.p2 = (lv_point_precise_t){center_x + sinf(angle) * 74,
                                      center_y - cosf(angle) * 74};
         lv_draw_line(layer, &line);
     }
-    if (!compass_valid) { return; }
-    float angle = -compass_heading * (3.14159265f / 180.0f);
-    float north_x = sinf(angle);
-    float north_y = -cosf(angle);
+    if (compass_valid) {
+        line.color = lv_color_hex(0xF37870);
+        line.width = 2;
+        line.p1 = (lv_point_precise_t){center_x, center_y - 60};
+        line.p2 = (lv_point_precise_t){center_x, center_y - 75};
+        lv_draw_line(layer, &line);
+    }
+    /* 外圈固定指向屏幕上沿，读数下的刻度随设备航向旋转。 */
     lv_draw_triangle_dsc_t triangle;
     lv_draw_triangle_dsc_init(&triangle);
     triangle.opa = LV_OPA_COVER;
-    triangle.color = lv_color_hex(0xF37870);
-    triangle.p[0] = (lv_point_precise_t){center_x + north_x * 43, center_y + north_y * 43};
-    triangle.p[1] = (lv_point_precise_t){center_x - north_y * 7, center_y + north_x * 7};
-    triangle.p[2] = (lv_point_precise_t){center_x + north_y * 7, center_y - north_x * 7};
-    lv_draw_triangle(layer, &triangle);
-    triangle.color = lv_color_hex(0xDDE7E5);
-    triangle.p[0] = (lv_point_precise_t){center_x - north_x * 37, center_y - north_y * 37};
+    triangle.color = lv_color_hex(compass_valid ? 0xFFFFFF : 0x526B61);
+    triangle.p[0] = (lv_point_precise_t){center_x, center_y - 78};
+    triangle.p[1] = (lv_point_precise_t){center_x - 7, center_y - 64};
+    triangle.p[2] = (lv_point_precise_t){center_x + 7, center_y - 64};
     lv_draw_triangle(layer, &triangle);
 }
 
-/* 航向只用模块水平两轴，不宣称真北、倾斜补偿或硬铁校准。 */
+static void position_compass_labels(void)
+{
+    static const unsigned bearings[] = {0, 90, 180, 270};
+    for (unsigned index = 0; index < 4; ++index) {
+        float angle = (bearings[index] - (compass_valid ? compass_heading : 0)) *
+                      (3.14159265f / 180.0f);
+        int center_x = 78 + (int)lroundf(sinf(angle) * 29);
+        int center_y = 78 - (int)lroundf(cosf(angle) * 29);
+        lv_obj_set_pos(compass_cardinal_labels[index], center_x - 14, center_y - 11);
+    }
+    for (unsigned index = 0; index < 12; ++index) {
+        float angle = (index * 30.0f - (compass_valid ? compass_heading : 0)) *
+                      (3.14159265f / 180.0f);
+        int center_x = 78 + (int)lroundf(sinf(angle) * 52);
+        int center_y = 78 - (int)lroundf(cosf(angle) * 52);
+        lv_obj_set_pos(compass_degree_labels[index], center_x - 17, center_y - 9);
+    }
+}
+
+static float compass_magnetic_heading(float forward, float right)
+{
+    float heading = atan2f(-right, forward) * (180.0f / 3.14159265f) +
+                    HW_MAG_HEADING_OFFSET_DEG;
+    heading = fmodf(heading, 360.0f);
+    return heading < 0 ? heading + 360.0f : heading;
+}
+
+/* 陀螺仪按重力方向积分快速旋转，新鲜磁场读数缓慢校正长期漂移。 */
 static void update_compass(const board_hardware_snapshot_t *hardware, bool valid)
 {
     float forward = hardware->magnetic_gauss[HW_MAG_FORWARD_AXIS] * HW_MAG_FORWARD_SIGN;
@@ -266,27 +308,72 @@ static void update_compass(const board_hardware_snapshot_t *hardware, bool valid
     for (unsigned axis = 0; axis < 3; ++axis) {
         total_squared += hardware->magnetic_gauss[axis] * hardware->magnetic_gauss[axis];
     }
-    valid = valid && isfinite(forward) && isfinite(right) &&
-            forward * forward + right * right > 0.000025f && total_squared < 1.44f;
-    if (valid) {
-        float heading = atan2f(-right, forward) * (180.0f / 3.14159265f);
-        if (heading < 0) { heading += 360; }
-        if (compass_valid) {
-            /* 沿最短圆弧平滑，跨越 359/0 度时不让指针绕行一整圈。 */
-            float delta = fmodf(heading - compass_heading + 540, 360) - 180;
-            compass_heading = fmodf(compass_heading + delta * 0.4f + 360, 360);
-        } else { compass_heading = heading; }
-        const char *directions[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+    bool magnetic_valid = valid && isfinite(forward) && isfinite(right) &&
+                          forward * forward + right * right > 0.000025f && total_squared < 1.44f;
+    float yaw_rate_dps = 0;
+    if (!compass_valid && magnetic_valid) {
+        compass_heading = compass_magnetic_heading(forward, right);
+        compass_valid = true;
+        compass_filtered_magnetic_heading = compass_heading;
+        compass_magnetic_filter_valid = true;
+        compass_last_imu_us = hardware->imu_us;
+        compass_last_magnetic_us = hardware->magnetic_us;
+    }
+    if (compass_valid && hardware->imu_valid && hardware->imu_us > compass_last_imu_us) {
+        float elapsed = (hardware->imu_us - compass_last_imu_us) / 1000000.0f;
+        compass_last_imu_us = hardware->imu_us;
+        float gravity_norm = sqrtf(hardware->acceleration_g[0] * hardware->acceleration_g[0] +
+                                   hardware->acceleration_g[1] * hardware->acceleration_g[1] +
+                                   hardware->acceleration_g[2] * hardware->acceleration_g[2]);
+        if (elapsed > 0 && elapsed <= 0.25f && gravity_norm >= 0.8f && gravity_norm <= 1.2f) {
+            for (unsigned axis = 0; axis < 3; ++axis) {
+                yaw_rate_dps += hardware->gyro_dps[axis] * hardware->acceleration_g[axis] / gravity_norm;
+            }
+            compass_heading = fmodf(compass_heading + HW_MAG_GYRO_SIGN * yaw_rate_dps * elapsed + 720, 360);
+        }
+    }
+    if (compass_valid && magnetic_valid && hardware->magnetic_us > compass_last_magnetic_us) {
+        float measured = compass_magnetic_heading(forward, right);
+        float elapsed = compass_last_magnetic_us ?
+            (hardware->magnetic_us - compass_last_magnetic_us) / 1000000.0f : 0.1f;
+        compass_last_magnetic_us = hardware->magnetic_us;
+        /* 先低通磁航向抑制瞬时噪声，再以互补低频校正陀螺积分漂移。 */
+        float magnetic_delta = compass_magnetic_filter_valid ?
+            fmodf(measured - compass_filtered_magnetic_heading + 540, 360) - 180 : 0;
+        float magnetic_alpha = 1.0f - expf(-fminf(elapsed, 0.5f) / 0.8f);
+        if (!compass_magnetic_filter_valid) { compass_filtered_magnetic_heading = measured; }
+        else {
+            compass_filtered_magnetic_heading = fmodf(compass_filtered_magnetic_heading +
+                                                       magnetic_delta * magnetic_alpha + 360, 360);
+        }
+        compass_magnetic_filter_valid = true;
+        float correction_tau = fabsf(yaw_rate_dps) < 5.0f ? 3.0f : 1.5f;
+        float correction = 1.0f - expf(-fminf(elapsed, 0.5f) / correction_tau);
+        float delta = fmodf(compass_filtered_magnetic_heading - compass_heading + 540, 360) - 180;
+        compass_heading = fmodf(compass_heading + delta * correction + 360, 360);
+    }
+    if (compass_valid && compass_last_magnetic_us &&
+        esp_timer_get_time() - compass_last_magnetic_us > 1000000) {
+        compass_valid = false;
+        compass_magnetic_filter_valid = false;
+    }
+    if (compass_valid) {
+        const char *directions[] = {"北", "东北", "东", "东南", "南", "西南", "西", "西北"};
         unsigned degrees = (unsigned)lroundf(compass_heading) % 360;
         unsigned direction = (unsigned)((compass_heading + 22.5f) / 45) % 8;
-        lv_label_set_text_fmt(compass_heading_label, "%03u deg %s", degrees, directions[direction]);
+        if (zh_font()) {
+            lv_label_set_text_fmt(compass_heading_label, "%s %03u°", directions[direction], degrees);
+        } else {
+            static const char *english_directions[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+            lv_label_set_text_fmt(compass_heading_label, "%s %03u deg", english_directions[direction], degrees);
+        }
     } else {
         lv_label_set_text(compass_heading_label, "-- deg");
-        if (hardware->magnetic_valid && total_squared >= 1.44f) {
+        if (valid && total_squared >= 1.44f) {
             lv_label_set_text(magnetic_state, "MAGNETIC DISTURBANCE");
         }
     }
-    compass_valid = valid;
+    position_compass_labels();
     lv_obj_invalidate(compass_dial);
 }
 
@@ -297,6 +384,22 @@ static void refresh_sensors(lv_timer_t *timer)
     board_hardware_snapshot_t hardware = {0};
     bool ready = board_hardware_snapshot(&hardware);
     int64_t now = esp_timer_get_time();
+    const lv_font_t *localized_font = zh_font();
+    if (localized_font && localized_font != gps_applied_font) {
+        lv_obj_t *gps_labels[] = {gps_state, gps_satellites, gps_latitude, gps_longitude,
+            gps_speed, gps_altitude, gps_age, gps_uart_info, gps_stream_info,
+            gps_sentence_info, gps_error_info, gps_hint, compass_heading_label,
+            compass_cardinal_labels[0], compass_cardinal_labels[1],
+            compass_cardinal_labels[2], compass_cardinal_labels[3],
+            compass_degree_labels[0], compass_degree_labels[1], compass_degree_labels[2],
+            compass_degree_labels[3], compass_degree_labels[4], compass_degree_labels[5],
+            compass_degree_labels[6], compass_degree_labels[7], compass_degree_labels[8],
+            compass_degree_labels[9], compass_degree_labels[10], compass_degree_labels[11]};
+        for (unsigned index = 0; index < sizeof(gps_labels) / sizeof(gps_labels[0]); ++index) {
+            lv_obj_set_style_text_font(gps_labels[index], localized_font, 0);
+        }
+        gps_applied_font = localized_font;
+    }
     if (lv_obj_is_visible(magnetometer)) {
         bool valid = ready && hardware.magnetic_valid;
         lv_label_set_text(magnetic_state, !HW_MMC5983_ENABLED ? "DISABLED" :
@@ -322,25 +425,42 @@ static void refresh_sensors(lv_timer_t *timer)
     }
     if (lv_obj_is_visible(gps)) {
         bool valid = ready && hardware.gnss_valid;
-        lv_label_set_text(gps_state, !HW_ATGM336H_ENABLED ? "DISABLED" :
-            !ready ? "BUSY" : valid ? "FIX VALID" : "WAITING / NO FIX");
+        lv_label_set_text(gps_state, !HW_ATGM336H_ENABLED ? "GPS未启用" :
+            !ready ? "正在读取" : !hardware.gnss_uart_ready ? "串口初始化失败" :
+            !hardware.gnss_rx_bytes ? "未收到串口数据" : !hardware.gnss_stream_active ? "数据流中断" :
+            valid ? "定位有效" : !hardware.gnss_valid_sentences ? "NMEA格式/校验错误" :
+            !hardware.gnss_fix_quality ? "正在搜星" : "等待有效定位");
         if (valid) {
-            lv_label_set_text_fmt(gps_satellites, "Satellites %u", hardware.satellites);
-            lv_label_set_text_fmt(gps_latitude, "Lat %+.6f", hardware.latitude);
-            lv_label_set_text_fmt(gps_longitude, "Lon %+.6f", hardware.longitude);
-            lv_label_set_text_fmt(gps_speed, "Speed %.1f km/h", hardware.speed_kmh);
+            lv_label_set_text_fmt(gps_satellites, "卫星数 %u", hardware.satellites);
+            lv_label_set_text_fmt(gps_latitude, "纬度 %+.6f", hardware.latitude);
+            lv_label_set_text_fmt(gps_longitude, "经度 %+.6f", hardware.longitude);
+            lv_label_set_text_fmt(gps_speed, "速度 %.1f km/h", hardware.speed_kmh);
         } else {
-            lv_label_set_text(gps_satellites, "Satellites --");
-            lv_label_set_text(gps_latitude, "Lat --");
-            lv_label_set_text(gps_longitude, "Lon --");
-            lv_label_set_text(gps_speed, "Speed -- km/h");
+            lv_label_set_text(gps_satellites, "卫星数 --");
+            lv_label_set_text(gps_latitude, "纬度 --");
+            lv_label_set_text(gps_longitude, "经度 --");
+            lv_label_set_text(gps_speed, "速度 -- km/h");
         }
         if (valid && hardware.altitude_valid) {
-            lv_label_set_text_fmt(gps_altitude, "Altitude %.1f m", hardware.altitude_m);
-        } else { lv_label_set_text(gps_altitude, "Altitude -- m"); }
+            lv_label_set_text_fmt(gps_altitude, "海拔 %.1f m", hardware.altitude_m);
+        } else { lv_label_set_text(gps_altitude, "海拔 -- m"); }
         if (ready && hardware.gnss_us) {
-            lv_label_set_text_fmt(gps_age, "AGE %lld ms", (long long)((now - hardware.gnss_us) / 1000));
-        } else { lv_label_set_text(gps_age, "AGE --"); }
+            lv_label_set_text_fmt(gps_age, "定位年龄 %lld ms", (long long)((now - hardware.gnss_us) / 1000));
+        } else { lv_label_set_text(gps_age, "定位年龄 --"); }
+        lv_label_set_text_fmt(gps_uart_info, "串口%d RX%d @%d | %s",
+            HW_GNSS_UART, HW_GNSS_RX, HW_GNSS_BAUD,
+            hardware.gnss_uart_ready ? "就绪" : esp_err_to_name(hardware.gnss_uart_result));
+        lv_label_set_text_fmt(gps_stream_info, "接收 %lu 发送 %lu 字节",
+            (unsigned long)hardware.gnss_rx_bytes,
+            (unsigned long)hardware.gnss_tx_bytes);
+        lv_label_set_text_fmt(gps_sentence_info, "NMEA %lu | %.5s Q%u 卫星 %u",
+            (unsigned long)hardware.gnss_valid_sentences,
+            hardware.gnss_last_sentence[0] ? hardware.gnss_last_sentence : "--",
+            hardware.gnss_fix_quality, hardware.satellites);
+        lv_label_set_text_fmt(gps_error_info, "校验 %lu 格式 %lu\n解析 %lu",
+            (unsigned long)hardware.gnss_checksum_errors,
+            (unsigned long)hardware.gnss_format_errors,
+            (unsigned long)hardware.gnss_parse_errors);
     }
 }
 
@@ -487,36 +607,45 @@ lv_obj_t *entertainment_view_create(void)
     imu_view_layout(240, 320);
     magnetometer = content();
     enable_vertical_scroll(magnetometer);
-    magnetic_state = make_label(magnetometer, "WAITING", 14, 4, 212, &lv_font_montserrat_12, 0x8CE2BE);
-    compass_dial = make_shape(magnetometer, 42, 24, 156, 156, 0x14231E, LV_RADIUS_CIRCLE);
+    compass_heading_label = make_label(magnetometer, "北---°", 14, 8, 212,
+                                        &lv_font_montserrat_28, 0xFFFFFF);
+    lv_obj_set_style_text_align(compass_heading_label, LV_TEXT_ALIGN_CENTER, 0);
+    compass_dial = make_shape(magnetometer, 42, 56, 156, 156, 0x14231E, LV_RADIUS_CIRCLE);
     lv_obj_set_style_border_width(compass_dial, 1, 0);
     lv_obj_set_style_border_color(compass_dial, lv_color_hex(0x3B504A), 0);
     lv_obj_set_scrollable(compass_dial, false);
     lv_obj_set_clickable(compass_dial, false);
     lv_obj_add_event_cb(compass_dial, draw_compass, LV_EVENT_DRAW_MAIN, NULL);
-    const char *cardinals[] = {"N", "E", "S", "W"};
-    const int cardinal_x[] = {66, 122, 66, 10};
-    const int cardinal_y[] = {10, 70, 130, 70};
+    const char *cardinals[] = {"北", "东", "南", "西"};
     for (unsigned index = 0; index < 4; ++index) {
-        lv_obj_t *label = make_label(compass_dial, cardinals[index], cardinal_x[index], cardinal_y[index],
-                                     24, &lv_font_montserrat_12, index ? 0xC1CBC9 : 0xF37870);
-        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+        compass_cardinal_labels[index] = make_label(compass_dial, cardinals[index], 0, 0, 28,
+                                     &lv_font_montserrat_12, 0xC1CBC9);
+        lv_obj_set_style_text_align(compass_cardinal_labels[index], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_clickable(compass_cardinal_labels[index], false);
     }
+    for (unsigned index = 0; index < 12; ++index) {
+        compass_degree_labels[index] = make_label(compass_dial, "", 0, 0, 34,
+                                                  &lv_font_montserrat_12, 0x8CA49B);
+        lv_label_set_text_fmt(compass_degree_labels[index], "%u", index * 30);
+        lv_obj_set_style_text_align(compass_degree_labels[index], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_clickable(compass_degree_labels[index], false);
+    }
+    position_compass_labels();
     lv_obj_t *hub = make_shape(compass_dial, 74, 74, 8, 8, 0x8CE2BE, LV_RADIUS_CIRCLE);
     lv_obj_set_clickable(hub, false);
-    compass_heading_label = make_label(magnetometer, "-- deg", 14, 184, 212,
-                                        &lv_font_montserrat_28, 0xFFFFFF);
-    lv_obj_set_style_text_align(compass_heading_label, LV_TEXT_ALIGN_CENTER, 0);
+    magnetic_state = make_label(magnetometer, "WAITING", 14, 214, 212,
+                                &lv_font_montserrat_12, 0x8CE2BE);
     const char *axes[] = {"X", "Y", "Z"};
     for (unsigned axis = 0; axis < 3; ++axis) {
         make_label(magnetometer, axes[axis], 14, 254 + axis * 24, 24, &lv_font_montserrat_12, 0x8CE2BE);
         magnetic_values[axis] = make_label(magnetometer, "-- G", 50, 254 + axis * 24, 176,
                                            &lv_font_montserrat_12, 0xFFFFFF);
     }
-    magnetic_strength = make_label(magnetometer, "Field -- G", 14, 222, 212, &lv_font_montserrat_12, 0xFFFFFF);
+    magnetic_strength = make_label(magnetometer, "Field -- G", 14, 238, 212, &lv_font_montserrat_12, 0xFFFFFF);
     magnetic_age = make_label(magnetometer, "AGE --", 14, 330, 212, &lv_font_montserrat_12, 0x8CA49B);
     magnetic_diagnostic = make_label(magnetometer, "MMC5983MA", 14, 354, 212, &lv_font_montserrat_12, 0x8CA49B);
     gps = content();
+    enable_vertical_scroll(gps);
     gps_state = make_label(gps, "WAITING / NO FIX", 14, 8, 212, &lv_font_montserrat_12, 0x8CE2BE);
     gps_satellites = make_label(gps, "Satellites --", 14, 38, 212, &lv_font_montserrat_12, 0xFFFFFF);
     gps_latitude = make_label(gps, "Lat --", 14, 68, 212, &lv_font_montserrat_12, 0xFFFFFF);
@@ -524,6 +653,14 @@ lv_obj_t *entertainment_view_create(void)
     gps_speed = make_label(gps, "Speed -- km/h", 14, 128, 212, &lv_font_montserrat_12, 0xFFFFFF);
     gps_altitude = make_label(gps, "Altitude -- m", 14, 158, 212, &lv_font_montserrat_12, 0xFFFFFF);
     gps_age = make_label(gps, "AGE --", 14, 208, 212, &lv_font_montserrat_12, 0x8CA49B);
+    gps_uart_info = make_label(gps, "UART --", 14, 238, 212, &lv_font_montserrat_12, 0x8CA49B);
+    gps_stream_info = make_label(gps, "RX -- | NMEA --", 14, 262, 212, &lv_font_montserrat_12, 0x8CA49B);
+    gps_sentence_info = make_label(gps, "Last -- | fix quality --", 14, 286, 212, &lv_font_montserrat_12, 0x8CA49B);
+    gps_error_info = make_label(gps, "Checksum -- | format -- | parse --", 14, 310, 212,
+                                &lv_font_montserrat_12, 0x8CA49B);
+    lv_obj_set_height(gps_error_info, 36);
+    gps_hint = make_label(gps, "室内可能无定位，请到室外", 14, 350, 212,
+                          &lv_font_montserrat_12, 0x8CA49B);
     wifi = content();
     wifi_view_create_in(lv_obj_get_display(screen), wifi);
     back_button = button(screen, LV_SYMBOL_LEFT, 10, 36, 34, 30, navigate, NULL);

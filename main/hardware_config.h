@@ -15,6 +15,12 @@
 #define HW_I2C_SDA 16
 #define HW_I2C_SCL 15
 #define HW_I2C_HZ 100000
+/* 采集快照采用时间常数低通，IMU偏重响应，磁场和GNSS偏重稳定。 */
+#define HW_IMU_ACCEL_FILTER_TAU_S 0.12f
+#define HW_IMU_GYRO_FILTER_TAU_S 0.08f
+#define HW_MAG_FILTER_TAU_S 0.20f
+#define HW_GNSS_FILTER_TAU_S 0.80f
+#define HW_GNSS_ALT_FILTER_TAU_S 1.00f
 /* MPU 地址沿用旧板实测结果；新板接线后仍须确认模块地址跳线。 */
 #define HW_MPU6050_ADDRESS 0x68
 #define HW_MMC5983_ADDRESS 0x30
@@ -23,11 +29,17 @@
 #define HW_MAG_RIGHT_AXIS 0
 #define HW_MAG_FORWARD_SIGN 1
 #define HW_MAG_RIGHT_SIGN 1
+#define HW_MAG_GYRO_SIGN -1
+/* 实测方位标识南北相反，用 180 度安装偏置统一修正角度与盘面。 */
+#define HW_MAG_HEADING_OFFSET_DEG 180.0f
 #if HW_MAG_FORWARD_AXIS < 0 || HW_MAG_FORWARD_AXIS > 2 || HW_MAG_RIGHT_AXIS < 0 || HW_MAG_RIGHT_AXIS > 2 || HW_MAG_FORWARD_AXIS == HW_MAG_RIGHT_AXIS
 #error "Invalid magnetometer heading axes"
 #endif
 #if (HW_MAG_FORWARD_SIGN != 1 && HW_MAG_FORWARD_SIGN != -1) || (HW_MAG_RIGHT_SIGN != 1 && HW_MAG_RIGHT_SIGN != -1)
 #error "Invalid magnetometer heading signs"
+#endif
+#if HW_MAG_GYRO_SIGN != 1 && HW_MAG_GYRO_SIGN != -1
+#error "Invalid magnetometer gyro sign"
 #endif
 #define HW_TOUCH_ADDRESS 0x38
 #define HW_AUDIO_ADDRESS 0x18
@@ -63,12 +75,12 @@
 #define HW_VBUS_ON_MV 4350
 #define HW_VBUS_OFF_MV 4250
 
-/* 固定安装：原始 X=-1g 为正向竖屏、X=+1g 为倒置；Y=+1g/-1g 对应 90/270 度。 */
+/* 实机方向校正：竖屏沿用 X 正向，横屏反转 Y；稳定约 0.5 秒后切屏。 */
 #define HW_IMU_SCREEN_X_AXIS 1
 #define HW_IMU_SCREEN_Y_AXIS 0
-#define HW_IMU_SCREEN_X_SIGN 1
+#define HW_IMU_SCREEN_X_SIGN -1
 #define HW_IMU_SCREEN_Y_SIGN 1
-#define HW_ROTATE_STABLE_SAMPLES 20
+#define HW_ROTATE_STABLE_SAMPLES 10
 
 /* 骑行默认 +Y 朝车头、Z 朝上；水平路面安装俯仰角用于抵消固定安装偏置。 */
 #define HW_RIDE_FORWARD_AXIS 1
