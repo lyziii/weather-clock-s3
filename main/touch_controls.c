@@ -2,6 +2,7 @@
 #include "esp_log.h"
 #include "ui_helpers.h"
 #include "entertainment_view.h"
+#include "cyber_tools.h"
 
 static lv_display_t *control_display;
 static bool (*submit_command)(const char *command);
@@ -116,7 +117,8 @@ static void page_gesture(lv_event_t *event)
     }
     lv_dir_t direction = lv_indev_get_gesture_dir(input);
     /* 系统内容区纵滑留给列表，只有从标题栏开始下拉才打开电源面板。 */
-    if (active_page == 1 && lv_obj_is_hidden(sleep_panel) && gesture_start_y >= 32 &&
+    if ((active_page == 1 || (active_page == 0 && cyber_tools_is_child())) &&
+        lv_obj_is_hidden(sleep_panel) && gesture_start_y >= 32 &&
         (direction == LV_DIR_BOTTOM || direction == LV_DIR_TOP)) { return; }
     if (direction == LV_DIR_BOTTOM) {
         show_sleep_panel();
@@ -130,6 +132,12 @@ static void page_gesture(lv_event_t *event)
     }
     if (!lv_obj_is_hidden(sleep_panel)) { return; }
     /* 系统二级页左滑返回首页，禁止横滑误切到其他一级页。 */
+    if (active_page == 0 && cyber_tools_is_child() &&
+        (direction == LV_DIR_LEFT || direction == LV_DIR_RIGHT)) {
+        if (direction == LV_DIR_LEFT) { cyber_tools_home(); }
+        lv_indev_wait_release(input);
+        return;
+    }
     if (active_page == 1 && entertainment_view_is_child() &&
         (direction == LV_DIR_LEFT || direction == LV_DIR_RIGHT)) {
         if (direction == LV_DIR_LEFT) { entertainment_view_home(); }

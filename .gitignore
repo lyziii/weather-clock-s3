@@ -5,6 +5,7 @@
 /sdkconfig.old
 /sdkconfig.backup
 *.bin
+!/fonts/ch16.bin
 *.elf
 *.map
 *.log

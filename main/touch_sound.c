@@ -68,6 +68,7 @@ static const demo_note_t demo_melody[] = {
 static atomic_bool music_start_requested;
 static atomic_bool music_stop_requested;
 static atomic_int music_state = MUSIC_STATE_STOPPED;
+static atomic_int requested_volume = HW_AUDIO_CLICK_VOLUME;
 static music_source_t music_source;
 static FILE *music_file;
 static uint32_t wav_rate;
@@ -81,6 +82,8 @@ static unsigned demo_index;
 static uint32_t demo_remaining;
 static double demo_phase;
 static char music_title[MUSIC_TITLE_SIZE] = "Music stopped";
+static char requested_music_path[TF_PATH_SIZE];
+static bool requested_builtin;
 static portMUX_TYPE music_title_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static void set_music_title(const char *text)
@@ -110,6 +113,36 @@ bool touch_sound_test(void)
 bool touch_sound_music_start(void)
 {
     if (!atomic_load(&sound_enabled) || !sound_task) { return false; }
+    taskENTER_CRITICAL(&music_title_lock);
+    requested_music_path[0] = 0;
+    requested_builtin = false;
+    taskEXIT_CRITICAL(&music_title_lock);
+    atomic_store(&music_stop_requested, false);
+    atomic_store(&music_start_requested, true);
+    return true;
+}
+
+bool touch_sound_music_start_path(const char *path)
+{
+    if (!path || strncmp(path, "/tf/", 4) != 0 || strlen(path) >= sizeof(requested_music_path) ||
+        !atomic_load(&sound_enabled) || !sound_task) { return false; }
+    taskENTER_CRITICAL(&music_title_lock);
+    memcpy(requested_music_path, path, strlen(path) + 1);
+    requested_builtin = false;
+    taskEXIT_CRITICAL(&music_title_lock);
+    atomic_store(&music_stop_requested, false);
+    atomic_store(&music_start_requested, true);
+    return true;
+}
+
+bool touch_sound_alarm_start(const char *path)
+{
+    if (path && path[0]) { return touch_sound_music_start_path(path); }
+    if (!atomic_load(&sound_enabled) || !sound_task) { return false; }
+    taskENTER_CRITICAL(&music_title_lock);
+    requested_builtin = true;
+    requested_music_path[0] = 0;
+    taskEXIT_CRITICAL(&music_title_lock);
     atomic_store(&music_stop_requested, false);
     atomic_store(&music_start_requested, true);
     return true;
@@ -119,6 +152,19 @@ void touch_sound_music_stop(void)
 {
     if (!sound_task) { return; }
     atomic_store(&music_stop_requested, true);
+}
+
+void touch_sound_alarm_volume(int percent)
+{
+    if (percent < 0) { percent = HW_AUDIO_CLICK_VOLUME; }
+    if (percent > 100) { percent = 100; }
+    atomic_store(&requested_volume, percent);
+}
+
+bool touch_sound_music_busy(void)
+{
+    int state = atomic_load(&music_state);
+    return atomic_load(&music_start_requested) || state == MUSIC_STATE_LOADING || state == MUSIC_STATE_PLAYING;
 }
 
 bool touch_sound_music_status(char *out, size_t size)
@@ -286,8 +332,14 @@ static void start_music_locked(void)
     atomic_store(&music_state, MUSIC_STATE_LOADING);
     set_music_title("Searching TF card...");
     bool opened = false;
+    char path[TF_PATH_SIZE];
+    taskENTER_CRITICAL(&music_title_lock);
+    memcpy(path, requested_music_path, sizeof(path));
+    bool builtin = requested_builtin;
+    taskEXIT_CRITICAL(&music_title_lock);
+    if (builtin) { demo_start_locked(); return; }
     tf_card_lock();
-    opened = music_open_first_locked();
+    opened = path[0] ? wav_open_locked(path) : music_open_first_locked();
     tf_card_unlock();
     if (opened) {
         music_source = MUSIC_SOURCE_WAV;
@@ -422,6 +474,7 @@ static int music_write_block_locked(void)
 static void audio_task(void *argument)
 {
     (void)argument;
+    int applied_volume = HW_AUDIO_CLICK_VOLUME;
     /* 首次通知仅释放启动门控，不能被解释为一次触摸。 */
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     for (;;) {
@@ -433,6 +486,10 @@ static void audio_task(void *argument)
             continue;
         }
 
+        int volume = atomic_load(&requested_volume);
+        if (volume != applied_volume && esp_codec_dev_set_out_vol(codec, volume) == ESP_CODEC_DEV_OK) {
+            applied_volume = volume;
+        }
         /* 音乐请求只改标志，不额外发通知，避免被误当成一次触摸音。 */
         if (atomic_exchange(&music_stop_requested, false)) { stop_music_locked(); }
         if (atomic_exchange(&music_start_requested, false)) { start_music_locked(); }

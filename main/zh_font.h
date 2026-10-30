@@ -2,11 +2,10 @@
 
 #include "lvgl.h"
 
-/* SD 卡中文字库（LVGL 二进制点阵 .bin）整体载入 PSRAM。
- * zh_font_init() 在 LVGL 锁内调用一次，注册 S: 文件系统驱动并创建低优先级
- * 加载任务；zh_font_tick() 在 LVGL 任务内周期调用，只投递加载请求并立即返回，
- * 等 TF 卡挂载后由后台任务读取 /tf/fonts/ch16.bin，失败约每 3 秒重试。
- * 加载成功后字形位图、字形描述符和字表全部常驻 PSRAM，文件句柄立即关闭。 */
+/* Flash 的 zh_font 分区保存 LVGL 二进制点阵字库，不依赖 SD 卡。
+ * zh_font_init() 在 LVGL 锁内调用一次，创建低优先级加载任务；
+ * zh_font_tick() 只投递请求并立即返回，失败约每 3 秒重试。
+ * 后台映射分区并解析，完成后释放映射，全部字形常驻 PSRAM。 */
 void zh_font_init(void);
 void zh_font_tick(void);
 

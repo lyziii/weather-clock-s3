@@ -27,6 +27,7 @@
 #include "entertainment_view.h"
 #include "zh_font.h"
 #include "lunar.h"
+#include "cyber_tools.h"
 
 #define NETWORK_READY BIT0
 #define TIME_READY BIT1
@@ -413,6 +414,7 @@ static void center_ui(void)
     place_label(ride_state_label, 12, height - 76, width / 2 - 12);
     place_label(ride_sensor_label, width / 2 + 8, height - 76, width / 2 - 20);
     start_weather_anims();
+    cyber_tools_resize();
 }
 
 /* 天气图标循环动画：太阳脉冲缩放、云呼吸、雨滴下落、雪花飘落、闪电闪烁。
@@ -441,6 +443,8 @@ static void start_weather_anims(void)
     lv_anim_delete(snow_flakes_layer, snow_fall_cb);
     lv_anim_delete(storm_icon, storm_flash_cb);
 
+    /* 可见钟面已由 Cyber 工具接管，不再驱动隐藏的旧天气动画。 */
+    if (lv_obj_is_hidden(weather_card)) { return; }
     lv_anim_t animation;
 
     /* 脉冲前恢复 32 px 并按容器内基准定位，动画删除后不会留下放大状态。 */
@@ -509,6 +513,7 @@ static void create_display_ui(lv_display_t *created_display)
     if (!hardware.imu_valid) { lv_display_set_rotation(display, manual_rotation); }
     zh_font_init();
     create_ui();
+    cyber_tools_create(desk_screen);
     center_ui();
     touch_controls_create(display, ride_screen, submit_touch_command);
     touch_controls_update(selected_page(), ride.running);
@@ -567,6 +572,7 @@ static void apply_zh_font(void)
 static void show_weather(const weather_data_t *weather, bool success)
 {
     if (!display || !lvgl_port_lock(1000)) { return; }
+    cyber_tools_weather(weather, success);
     weather_failed = !success;
     if (success) {
         last_weather_update = esp_timer_get_time();
@@ -632,12 +638,7 @@ esp_err_t weather_clock_init(void)
     if (!state_mutex) { return ESP_ERR_NO_MEM; }
     nvs_handle_t storage;
     if (nvs_open("device_ui", NVS_READONLY, &storage) == ESP_OK) {
-        uint8_t saved_mode = 0;
-        if (nvs_get_u8(storage, "mode", &saved_mode) == ESP_OK) {
-            ride_mode = saved_mode == 1;
-            /* 旧版独立 IMU 标签迁移为系统首页，不再占用一级分页。 */
-            media_mode = saved_mode == 2 || saved_mode == 3;
-        }
+        /* 桌面时钟固件统一以太空人钟面启动，仍保留手动旋转设置。 */
         uint8_t saved_rotation = 0;
         if (nvs_get_u8(storage, "rotation", &saved_rotation) == ESP_OK &&
             saved_rotation <= LV_DISPLAY_ROTATION_270) {
@@ -711,6 +712,18 @@ bool weather_clock_command(const char *command)
     bool save_rotation = false;
     bool enter_sleep = strcmp(command, "power sleep") == 0;
     lv_screen_load_anim_t transition = LV_SCREEN_LOAD_ANIM_NONE;
+    if (enter_sleep && display) {
+        bool allowed = false;
+        if (lvgl_port_lock(1000)) {
+            allowed = cyber_tools_allow_sleep();
+            lvgl_port_unlock();
+        }
+        if (!allowed) {
+            printf("Sleep blocked: disable alarms, stop timers and wait for AI requests.\n");
+            xSemaphoreGive(state_mutex);
+            return true;
+        }
+    }
     if (enter_sleep) {
         printf("Entering touch-wake sleep. Tap the screen three times to wake.\n");
     } else if (strcmp(command, "page next") == 0 || strcmp(command, "page prev") == 0) {
@@ -900,6 +913,7 @@ void weather_clock_tick(bool online, bool time_valid)
     if (!display) { xSemaphoreGive(state_mutex); return; }
     if (!lvgl_port_lock(100)) { xSemaphoreGive(state_mutex); return; }
     apply_zh_font();
+    cyber_tools_tick(online, time_valid);
     touch_controls_set_manual_rotation(!hardware.imu_valid);
     /* 无传感器时各页沿用手动方向；恢复读数后仅时钟页自动旋转。 */
     lv_display_rotation_t rotation = boot_overlay ? lv_display_get_rotation(display) : LV_DISPLAY_ROTATION_0;
