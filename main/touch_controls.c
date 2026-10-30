@@ -10,6 +10,7 @@ static lv_obj_t *page_dots[3];
 static lv_obj_t *ride_buttons[3];
 static lv_obj_t *reset_overlay;
 static lv_obj_t *sleep_panel;
+static lv_obj_t *rotate_button;
 static unsigned active_page = 3;
 static int gesture_start_y;
 static bool gestures_blocked;
@@ -90,12 +91,13 @@ static void show_sleep_panel(void)
     if (!lv_obj_is_hidden(sleep_panel)) { return; }
     lv_obj_set_hidden(sleep_panel, false);
     lv_obj_set_style_opa(sleep_panel, LV_OPA_COVER, 0);
-    lv_obj_set_y(sleep_panel, -112);
+    int32_t start_y = -lv_obj_get_height(sleep_panel) - 4;
+    lv_obj_set_y(sleep_panel, start_y);
     lv_anim_t animation;
     lv_anim_init(&animation);
     lv_anim_set_var(&animation, sleep_panel);
     lv_anim_set_exec_cb(&animation, slide_sleep_panel);
-    lv_anim_set_values(&animation, -112, 10);
+    lv_anim_set_values(&animation, start_y, 10);
     lv_anim_set_duration(&animation, 220);
     lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
     lv_anim_start(&animation);
@@ -186,6 +188,7 @@ static void controls_deleted(lv_event_t *event)
     lv_anim_delete(sleep_panel, slide_sleep_panel);
     page_indicator = NULL;
     sleep_panel = NULL;
+    rotate_button = NULL;
     control_display = NULL;
     active_page = 3;
 }
@@ -233,6 +236,10 @@ void touch_controls_create(lv_display_t *display, lv_obj_t *ride_page,
     lv_obj_set_style_radius(cancel_button, 6, 0);
     lv_obj_set_pos(cancel_button, 118, 50);
     lv_obj_set_size(cancel_button, 96, 48);
+    rotate_button = create_button(sleep_panel, LV_SYMBOL_REFRESH " Rotate 90", command_clicked, "display rotate");
+    lv_obj_set_pos(rotate_button, 10, 106);
+    lv_obj_set_size(rotate_button, 204, 42);
+    lv_obj_set_hidden(rotate_button, true);
     for (unsigned index = 0; index < 3; ++index) {
         page_dots[index] = make_shape(page_indicator, 7 + index * 16, 3, 6, 6,
                                       0x527C6E, LV_RADIUS_CIRCLE);
@@ -256,6 +263,14 @@ void touch_controls_create(lv_display_t *display, lv_obj_t *ride_page,
             break;
         }
     }
+}
+
+void touch_controls_set_manual_rotation(bool available)
+{
+    if (!rotate_button) { return; }
+    /* 保留原有睡眠按钮布局，只在传感器不可用时增加一行。 */
+    lv_obj_set_hidden(rotate_button, !available);
+    lv_obj_set_height(sleep_panel, available ? 158 : 108);
 }
 
 void touch_controls_update(unsigned page, bool running)

@@ -10,3 +10,6 @@ void touch_controls_set_blocked(bool blocked);
 void touch_controls_create(lv_display_t *display, lv_obj_t *ride_page,
 						   bool (*submit)(const char *command));
 void touch_controls_update(unsigned page, bool running);
+
+/* 无有效姿态读数时显示手动翻转入口；调用方须持有 LVGL 锁。 */
+void touch_controls_set_manual_rotation(bool available);

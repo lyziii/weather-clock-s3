@@ -74,6 +74,8 @@ static bool weather_failed;
 static SemaphoreHandle_t state_mutex;
 static bool ride_mode;
 static bool media_mode;
+/* 传感器不可用时，各页共用持久化的四向旋转状态，避免刷新或重启回正。 */
+static lv_display_rotation_t manual_rotation = LV_DISPLAY_ROTATION_0;
 static ride_model_t ride;
 static lv_obj_t *desk_screen;
 static lv_obj_t *ride_screen;
@@ -501,6 +503,10 @@ static void start_weather_anims(void)
 static void create_display_ui(lv_display_t *created_display)
 {
     display = created_display;
+    board_hardware_snapshot_t hardware = {0};
+    board_hardware_snapshot(&hardware);
+    /* 创建页面前恢复方向，开机动画也沿用用户保存的横竖屏。 */
+    if (!hardware.imu_valid) { lv_display_set_rotation(display, manual_rotation); }
     zh_font_init();
     create_ui();
     center_ui();
@@ -632,6 +638,11 @@ esp_err_t weather_clock_init(void)
             /* 旧版独立 IMU 标签迁移为系统首页，不再占用一级分页。 */
             media_mode = saved_mode == 2 || saved_mode == 3;
         }
+        uint8_t saved_rotation = 0;
+        if (nvs_get_u8(storage, "rotation", &saved_rotation) == ESP_OK &&
+            saved_rotation <= LV_DISPLAY_ROTATION_270) {
+            manual_rotation = (lv_display_rotation_t)saved_rotation;
+        }
         nvs_close(storage);
     }
     network_events = xEventGroupCreate();
@@ -696,6 +707,8 @@ bool weather_clock_command(const char *command)
     bool handled = true;
     bool save_mode = false;
     bool open_imu = false;
+    bool rotate_display = false;
+    bool save_rotation = false;
     bool enter_sleep = strcmp(command, "power sleep") == 0;
     lv_screen_load_anim_t transition = LV_SCREEN_LOAD_ANIM_NONE;
     if (enter_sleep) {
@@ -731,6 +744,8 @@ bool weather_clock_command(const char *command)
         ride_model_pause(&ride, now);
         previous_gnss_us = 0;
         printf("MPU6050 diagnostics; ride timer paused.\n");
+    } else if (strcmp(command, "display rotate") == 0) {
+        rotate_display = true;
     } else if (strcmp(command, "ride start") == 0) {
         if (ride_mode) {
             if (!ride.running) { previous_gnss_us = 0; }
@@ -764,9 +779,23 @@ bool weather_clock_command(const char *command)
         if (result != ESP_OK) { printf("Mode not saved: %s\n", esp_err_to_name(result)); }
     }
     if (handled && !enter_sleep && display && lvgl_port_lock(1000)) {
-        /* 只有时钟页自动旋转；切出后立即回正，避免码表和诊断页短暂沿用横屏方向。 */
-        if ((ride_mode || media_mode) && lv_display_get_rotation(display) != LV_DISPLAY_ROTATION_0) {
-            lv_display_set_rotation(display, LV_DISPLAY_ROTATION_0);
+        board_hardware_snapshot_t hardware = {0};
+        board_hardware_snapshot(&hardware);
+        touch_controls_set_manual_rotation(!hardware.imu_valid);
+        /* 再次核对读数，避免按钮点击排队期间传感器恢复后仍覆盖自动朝向。 */
+        if (rotate_display && !hardware.imu_valid) {
+            switch (manual_rotation) {
+            case LV_DISPLAY_ROTATION_0: manual_rotation = LV_DISPLAY_ROTATION_90; break;
+            case LV_DISPLAY_ROTATION_90: manual_rotation = LV_DISPLAY_ROTATION_180; break;
+            case LV_DISPLAY_ROTATION_180: manual_rotation = LV_DISPLAY_ROTATION_270; break;
+            default: manual_rotation = LV_DISPLAY_ROTATION_0; break;
+            }
+            save_rotation = true;
+        }
+        lv_display_rotation_t rotation = !hardware.imu_valid ? manual_rotation :
+            ((ride_mode || media_mode) ? LV_DISPLAY_ROTATION_0 : lv_display_get_rotation(display));
+        if (lv_display_get_rotation(display) != rotation) {
+            lv_display_set_rotation(display, rotation);
             center_ui();
         }
         if (transition != LV_SCREEN_LOAD_ANIM_NONE) {
@@ -781,6 +810,17 @@ bool weather_clock_command(const char *command)
         }
         touch_controls_update(selected_page(), ride.running);
         lvgl_port_unlock();
+    }
+    /* Flash 提交不占用界面锁；状态锁保证连续点击按顺序保存。 */
+    if (save_rotation) {
+        nvs_handle_t storage;
+        esp_err_t result = nvs_open("device_ui", NVS_READWRITE, &storage);
+        if (result == ESP_OK) {
+            result = nvs_set_u8(storage, "rotation", (uint8_t)manual_rotation);
+            if (result == ESP_OK) { result = nvs_commit(storage); }
+            nvs_close(storage);
+        }
+        if (result != ESP_OK) { ESP_LOGW(TAG, "Rotation not saved: %s", esp_err_to_name(result)); }
     }
     xSemaphoreGive(state_mutex);
     if (enter_sleep) {
@@ -860,9 +900,12 @@ void weather_clock_tick(bool online, bool time_valid)
     if (!display) { xSemaphoreGive(state_mutex); return; }
     if (!lvgl_port_lock(100)) { xSemaphoreGive(state_mutex); return; }
     apply_zh_font();
-    /* 姿态只改变摆件的显示方向，不自动改变 desk/ride 模式；码表保持安装方向。 */
-    lv_display_rotation_t rotation = LV_DISPLAY_ROTATION_0;
-    if (HW_AUTO_ROTATE_ENABLED && !ride_mode && !media_mode && !boot_overlay && hardware.imu_valid && hardware.rotation_valid) {
+    touch_controls_set_manual_rotation(!hardware.imu_valid);
+    /* 无传感器时各页沿用手动方向；恢复读数后仅时钟页自动旋转。 */
+    lv_display_rotation_t rotation = boot_overlay ? lv_display_get_rotation(display) : LV_DISPLAY_ROTATION_0;
+    if (!boot_overlay && !hardware.imu_valid) {
+        rotation = manual_rotation;
+    } else if (HW_AUTO_ROTATE_ENABLED && !ride_mode && !media_mode && !boot_overlay && hardware.imu_valid && hardware.rotation_valid) {
         if (hardware.rotation_degrees == 90) { rotation = LV_DISPLAY_ROTATION_90; }
         else if (hardware.rotation_degrees == 180) { rotation = LV_DISPLAY_ROTATION_180; }
         else if (hardware.rotation_degrees == 270) { rotation = LV_DISPLAY_ROTATION_270; }
