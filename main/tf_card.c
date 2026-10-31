@@ -29,7 +29,7 @@ static sdmmc_card_t *card;
 static sdmmc_card_t *usb_card;
 static bool usb_mode;
 
-/* 所有访问卡的操作（VFS 目录、字库文件、挂载/卸载）都通过这把锁串行化。
+/* 所有访问卡的操作（VFS 目录、WAV 播放、挂载/卸载）都通过这把锁串行化。
  * FatFs 在 IDF 中并非完全可重入，且卸载会释放 card 结构。 */
 void tf_card_lock(void)
 {
@@ -41,7 +41,7 @@ void tf_card_unlock(void)
     if (fs_mutex) { xSemaphoreGive(fs_mutex); }
 }
 
-/* 字库加载和音乐播放都会在别的任务里连续读多个块。用计数而不是布尔值，
+/* WAV 播放在别的任务里连续读多个块。用计数而不是布尔值，
  * 允许多个读者重叠；计数非零期间后台任务不卸载、USB 不切换，保证每个
  * 读者看到的是同一张挂载的卡。 */
 static portMUX_TYPE reader_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -199,9 +199,8 @@ static void card_task(void *argument)
             tf_card_unlock();
         }
         /* 卡座没有独立检测引脚，用卡状态命令探测拔出，失败后释放挂载并重试。
-         * 中文字库已整体载入 PSRAM，不再持有这里打开的文件，因此卸载 /tf
-         * 不会影响已显示的中文；重插卡后只需重新挂载供文件浏览使用。
-         * 字库正在整体读取时先不卸载，否则读一半的文件会被抽走。 */
+         * 中文字库常驻 Flash，与 TF 卡无关；卸载 /tf 只影响文件浏览和 WAV 播放。
+         * WAV 正在连续读取时先不卸载，否则读一半的文件会被抽走。 */
         tf_card_lock();
         if (!usb_mode && card && !reader_active() && sdmmc_get_status(card) != ESP_OK) {
             esp_vfs_fat_sdcard_unmount(TF_MOUNT, card);
@@ -218,8 +217,8 @@ sdmmc_card_t *tf_card_enter_usb(void)
     if (usb_mode || !card) { return NULL; }
     usb_mode = true;
 
-    /* 字库正在整体载入时不允许切走卡；调用方稍后重试即可。
-     * 置位 usb_mode 后再取锁复查，确保不会在检查与卸载之间开始一次字库读取。 */
+    /* WAV 正在整体播放时不允许切走卡；调用方稍后重试即可。
+     * 置位 usb_mode 后再取锁复查，确保不会在检查与卸载之间开始一次播放读取。 */
     tf_card_lock();
     if (reader_active()) {
         usb_mode = false;
@@ -228,7 +227,7 @@ sdmmc_card_t *tf_card_enter_usb(void)
     }
 
     /* 取锁会等待后台任务完成当前目录读取，避免在 FatFs 操作中途卸载。
-     * 先标记为未挂载：切换期间界面与字库都不要再访问 /tf。
+     * 先标记为未挂载：切换期间界面与 WAV 播放都不要再访问 /tf。
      * esp_vfs_fat_sdcard_unmount 会释放 card 结构，因此立即清空本地指针。 */
     working.mounted = false;
     publish();

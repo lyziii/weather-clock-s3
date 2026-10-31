@@ -2,3 +2,6 @@
 nvs, data, nvs, 0x9000, 0x6000,
 phy_init, data, phy, 0xf000, 0x1000,
 factory, app, factory, 0x10000, 0x1f0000,
+# 中文字库：main/fonts/ch16.bin 的原始字节由 idf.py flash 直接写入这个分区，
+# 运行期 zh_font.c 用 esp_partition_mmap 映射后交给 LVGL 解析，不依赖 TF 卡。
+font, data, 0x40, 0x200000, 0x300000,

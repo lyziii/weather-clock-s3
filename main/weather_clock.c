@@ -25,6 +25,7 @@
 #include "touch_sound.h"
 #include "tf_card.h"
 #include "entertainment_view.h"
+#include "astro_view.h"
 #include "zh_font.h"
 #include "lunar.h"
 
@@ -74,6 +75,9 @@ static bool weather_failed;
 static SemaphoreHandle_t state_mutex;
 static bool ride_mode;
 static bool media_mode;
+/* 手动显示方向（0 = 跟随重力），保存到 NVS：没有陀螺仪的板子重启后仍保持选择。 */
+static unsigned manual_rotation;
+static const char *const rotation_names[5] = {"auto", "0", "90", "180", "270"};
 static ride_model_t ride;
 static lv_obj_t *desk_screen;
 static lv_obj_t *ride_screen;
@@ -121,6 +125,18 @@ static lv_obj_t *selected_screen(void)
 static unsigned selected_page(void)
 {
     return media_mode ? 1 : (ride_mode ? 2 : 0);
+}
+
+/* 手动方向：0 = 跟随重力，1..4 = 固定 0/90/180/270 度。 */
+static lv_display_rotation_t manual_rotation_value(unsigned selection)
+{
+    switch (selection) {
+    case 1: return LV_DISPLAY_ROTATION_0;
+    case 2: return LV_DISPLAY_ROTATION_90;
+    case 3: return LV_DISPLAY_ROTATION_180;
+    case 4: return LV_DISPLAY_ROTATION_270;
+    default: return LV_DISPLAY_ROTATION_0;
+    }
 }
 
 static void boot_line_width(void *object, int32_t width)
@@ -237,27 +253,26 @@ static void create_ui(void)
     desk_screen = screen;
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x101918), 0);
     lv_obj_set_scrollable(screen, false);
-    /* 页头：左侧城市，右上角状态图标；日期与星期同一行，农历单独一行。 */
-    city_label = make_label(screen, WEATHER_CITY, 14, 8, 150, LV_FONT_DEFAULT, 0x8CE2BE);
-    date_label = make_label(screen, "---- -- --", 14, 34, 120, LV_FONT_DEFAULT, 0xC1CBC9);
-    weekday_label = make_label(screen, "--", 122, 34, 104, LV_FONT_DEFAULT, 0xC1CBC9);
-    lv_obj_set_style_text_align(weekday_label, LV_TEXT_ALIGN_RIGHT, 0);
-    lunar_label = make_label(screen, "", 14, 58, 212, LV_FONT_DEFAULT, 0xC1CBC9);
-    lv_obj_set_style_text_align(lunar_label, LV_TEXT_ALIGN_CENTER, 0);
+    /* 页头：左侧城市，右上角状态图标；日期、星期、农历合并为一行。 */
+    city_label = make_label(screen, WEATHER_CITY, 14, 6, 150, LV_FONT_DEFAULT, 0x8CE2BE);
+    date_label = make_label(screen, "---- -- --", 14, 28, 90, LV_FONT_DEFAULT, 0xC1CBC9);
+    weekday_label = make_label(screen, "--", 104, 28, 38, LV_FONT_DEFAULT, 0xC1CBC9);
+    lunar_label = make_label(screen, "", 142, 28, 84, LV_FONT_DEFAULT, 0xC1CBC9);
+    lv_obj_set_style_text_align(lunar_label, LV_TEXT_ALIGN_RIGHT, 0);
     /* 48 px 时间："12:34:56" 约 184 px，横竖屏都能完整显示。 */
-    time_label = make_label(screen, "--:--:--", 0, 84, 240, &lv_font_montserrat_48, 0xFFFFFF);
+    time_label = make_label(screen, "--:--:--", 0, 50, 240, &lv_font_montserrat_48, 0xFFFFFF);
     lv_obj_set_style_text_align(time_label, LV_TEXT_ALIGN_CENTER, 0);
-    /* 天气卡片把图标、温度、描述和湿度收成一组，与日期/时间分开。 */
-    weather_card = make_shape(screen, 14, 150, 212, 126, 0x172321, 8);
+    /* 天气卡片收成三行：图标+温度、描述与湿度分列左右、数据来源贴底。 */
+    weather_card = make_shape(screen, 14, 106, 212, 108, 0x172321, 8);
     lv_obj_set_clickable(weather_card, false);
     lv_obj_set_scrollable(weather_card, false);
-    temperature_label = make_label(screen, "-- C", 14, 171, 100, &lv_font_montserrat_28, 0xFFFFFF);
+    temperature_label = make_label(screen, "-- C", 14, 119, 100, &lv_font_montserrat_28, 0xFFFFFF);
     lv_obj_set_width(temperature_label, LV_SIZE_CONTENT);
-    condition_label = make_label(screen, "Weather pending", 14, 230, 212, LV_FONT_DEFAULT, 0xFFFFFF);
-    lv_obj_set_style_text_align(condition_label, LV_TEXT_ALIGN_CENTER, 0);
-    humidity_label = make_label(screen, "Humidity: --%", 14, 252, 212, LV_FONT_DEFAULT, 0xB2C0BC);
-    lv_obj_set_style_text_align(humidity_label, LV_TEXT_ALIGN_CENTER, 0);
-    weather_status_label = make_label(screen, "Open-Meteo | UTC+8", 14, 286, 212, &lv_font_montserrat_12, 0x8CA49B);
+    condition_label = make_label(screen, "Pending", 16, 158, 104, LV_FONT_DEFAULT, 0xFFFFFF);
+    humidity_label = make_label(screen, "Humidity: --%", 120, 158, 104, LV_FONT_DEFAULT, 0xB2C0BC);
+    lv_obj_set_style_text_align(humidity_label, LV_TEXT_ALIGN_RIGHT, 0);
+    weather_status_label = make_label(screen, "Open-Meteo | UTC+8", 14, 186, 212,
+                                      &lv_font_montserrat_12, 0x8CA49B);
     lv_obj_set_style_text_align(weather_status_label, LV_TEXT_ALIGN_CENTER, 0);
     /* 五种天气图标装在同一个固定槽位里；槽位位置只由 align_weather_icons() 决定，
      * 动画只作用于槽位内部的图元，不再移动槽位，因此横竖屏都与温度保持同一相对位置。 */
@@ -291,6 +306,8 @@ static void create_ui(void)
     lv_obj_set_hidden(rain_icon, true);
     lv_obj_set_hidden(snow_icon, true);
     lv_obj_set_hidden(storm_icon, true);
+    /* 太空人挂件放在时钟页底部，位置由 center_ui() 按横竖屏给出。 */
+    astro_view_create_in(screen);
     ESP_LOGI(TAG, "LCD stage: weather page ready; creating ride page");
     create_ride_ui();
     ESP_LOGI(TAG, "LCD stage: ride page ready; creating system page");
@@ -304,8 +321,9 @@ static void create_ui(void)
     ESP_LOGI(TAG, "LCD stage: initial screen loaded");
 }
 
-/* 页面用满显示区域；时钟页按“页头/日期行/大号时间/天气卡片/来源”分区，
- * 横屏时间占满整行，天气卡片横向铺开；码表指标由两列三行切换为三列两行。 */
+/* 页面用满显示区域；时钟页按“页头/日期行/大号时间/天气卡片/太空人挂件”分区，
+ * 竖屏把星期与农历收进日期行、数据来源收进天气卡片，横屏时间靠左、右侧放挂件；
+ * 码表指标由两列三行切换为三列两行。 */
 static void start_weather_anims(void);
 
 /* 温度与图标槽位同一行：槽位左边缘固定为“温度文字右边缘 + WEATHER_ICON_GAP”，
@@ -323,8 +341,8 @@ static void align_weather_icons(void)
     int height = lv_display_get_vertical_resolution(display);
     bool landscape = width > height;
 
-    /* 温度行中心：横屏在天气卡片内偏上，竖屏在卡片内居中。 */
-    int32_t row_center = landscape ? 162 : 186;
+    /* 温度行中心：横屏在天气卡片内偏上，竖屏在三行卡片的第一行。 */
+    int32_t row_center = landscape ? 162 : 134;
     /* 横屏温度靠卡片左侧，右侧留给天气描述；竖屏“温度 + 间距 + 图标槽位”整组居中。 */
     int32_t group_width = temperature_width + WEATHER_ICON_GAP + WEATHER_ICON_WIDTH;
     int32_t temperature_x = landscape ? 24 : (width - group_width + 1) / 2;
@@ -346,40 +364,51 @@ static void center_ui(void)
         lv_obj_set_style_pad_all(screens[index], 0, 0);
         lv_obj_set_style_border_width(screens[index], 0, 0);
     }
-    /* 时钟页：页头 → 日期行 → 大号时间 → 天气卡片 → 数据来源。 */
-    place_label(city_label, 14, 8, landscape ? 140 : 150);
-    place_label(date_label, 14, 34, 120);
-    place_label(weekday_label, 122, 34, landscape ? 44 : 104);
-    lv_obj_set_style_text_align(weekday_label, LV_TEXT_ALIGN_RIGHT, 0);
+    /* 时钟页：页头 → 日期/星期/农历 → 大号时间 → 天气卡片 → 太空人挂件。 */
+    place_label(city_label, 14, landscape ? 8 : 6, landscape ? 140 : 150);
+    /* 日期、星期、农历同一行；农历最长五个字（闰月），至少留 80 px。 */
+    place_label(date_label, 14, landscape ? 34 : 28, 90);
+    place_label(weekday_label, 104, landscape ? 34 : 28, landscape ? 34 : 38);
+    lv_obj_set_style_text_align(weekday_label, LV_TEXT_ALIGN_LEFT, 0);
     if (landscape) {
-        /* 横屏把农历移到日期行右侧，给大号时间腾出一整行。 */
-        place_label(lunar_label, 172, 34, width - 186);
-        lv_obj_set_style_text_align(lunar_label, LV_TEXT_ALIGN_RIGHT, 0);
+        /* 横屏右侧留给太空人面板，农历右边缘与面板左侧留 6 px。 */
+        place_label(lunar_label, 138, 34, 82);
     } else {
-        place_label(lunar_label, 14, 58, width - 28);
-        lv_obj_set_style_text_align(lunar_label, LV_TEXT_ALIGN_CENTER, 0);
+        place_label(lunar_label, 142, 28, 84);
     }
-    place_label(time_label, 0, landscape ? 60 : 84, width);
+    lv_obj_set_style_text_align(lunar_label, LV_TEXT_ALIGN_RIGHT, 0);
 
     if (landscape) {
-        /* 横屏：天气卡片横向铺开，图标+温度在左，描述与湿度在右。 */
+        /* 横屏：时间靠左，右侧与日期行同高的是 80 x 80 的太空人面板。 */
+        place_label(time_label, 10, 60, 206);
+        lv_obj_set_style_text_align(time_label, LV_TEXT_ALIGN_LEFT, 0);
+        /* 天气卡片横向铺开，图标+温度在左，描述与湿度在右。 */
         lv_obj_set_pos(weather_card, 14, 126);
         lv_obj_set_size(weather_card, width - 28, 76);
         place_label(condition_label, 202, 144, width - 216);
         place_label(humidity_label, 202, 167, width - 216);
         lv_obj_set_style_text_align(condition_label, LV_TEXT_ALIGN_LEFT, 0);
         lv_obj_set_style_text_align(humidity_label, LV_TEXT_ALIGN_LEFT, 0);
+        /* 横屏卡片只有 76 px，数据来源仍留在底部一行，与卡片右边缘对齐。 */
+        place_label(weather_status_label, 14, height - 34, width - 28);
+        lv_obj_set_style_text_align(weather_status_label, LV_TEXT_ALIGN_CENTER, 0);
+        /* 面板右边缘与天气卡片对齐；横屏空间紧，画布正好填满 80 x 80 面板。 */
+        astro_view_layout(width - 94, 36, 80, 80);
     } else {
-        /* 竖屏：天气卡片居中，图标+温度成组居中，描述与湿度各占一行。 */
-        lv_obj_set_pos(weather_card, 14, 150);
-        lv_obj_set_size(weather_card, width - 28, 126);
-        place_label(condition_label, 14, 230, width - 28);
-        place_label(humidity_label, 14, 252, width - 28);
-        lv_obj_set_style_text_align(condition_label, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_text_align(humidity_label, LV_TEXT_ALIGN_CENTER, 0);
+        /* 竖屏：时间居中；天气卡片三行，描述与湿度同行左右分列，来源贴底。 */
+        place_label(time_label, 0, 50, width);
+        lv_obj_set_style_text_align(time_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(weather_card, 14, 106);
+        lv_obj_set_size(weather_card, width - 28, 108);
+        place_label(condition_label, 16, 158, 104);
+        place_label(humidity_label, 120, 158, width - 136);
+        lv_obj_set_style_text_align(condition_label, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_align(humidity_label, LV_TEXT_ALIGN_RIGHT, 0);
+        place_label(weather_status_label, 14, 186, width - 28);
+        lv_obj_set_style_text_align(weather_status_label, LV_TEXT_ALIGN_CENTER, 0);
+        /* 底部留出翻页圆点位置：太空人面板 84 px 高，画布 80 x 80 居中。 */
+        astro_view_layout(14, 218, width - 28, 84);
     }
-    /* 底部留出翻页圆点位置：来源行上移，圆点淡出时不压住文字。 */
-    place_label(weather_status_label, 14, height - 34, width - 28);
     align_weather_icons();
 
     lv_obj_set_pos(ride_speed_band, 0, landscape ? 30 : 36);
@@ -501,11 +530,16 @@ static void start_weather_anims(void)
 static void create_display_ui(lv_display_t *created_display)
 {
     display = created_display;
+    /* 保存的手动方向先落地，开机时不先竖屏再转横屏；码表与系统页仍用安装方向。 */
+    if (manual_rotation && !ride_mode && !media_mode) {
+        lv_display_set_rotation(display, manual_rotation_value(manual_rotation));
+    }
     zh_font_init();
     create_ui();
     center_ui();
     touch_controls_create(display, ride_screen, submit_touch_command);
     touch_controls_update(selected_page(), ride.running);
+    touch_controls_set_rotation(manual_rotation);
     show_boot_animation();
 }
 
@@ -518,7 +552,7 @@ static const char *localize(const char *zh, const char *en)
 static void render_condition(void)
 {
     if (cached_weather_code < 0) {
-        lv_label_set_text(condition_label, localize("天气加载中", "Weather pending"));
+        lv_label_set_text(condition_label, localize("天气加载中", "Pending"));
         return;
     }
     lv_label_set_text(condition_label,
@@ -536,9 +570,8 @@ static void render_humidity(void)
         localize("湿度：%d%%", "Humidity: %d%%"), cached_humidity);
 }
 
-/* 中文字库加载或释放后，把时钟页标签切换到对应字体并刷新文案。
- * 以字体指针作为“已应用”标记：U 盘模式会释放字体，退出后重新加载，
- * 指针变化即触发再次应用。 */
+/* 中文字库在后台任务里解析完成前用英文和 Montserrat，完成后切换到中文。
+ * 以字体指针作为“已应用”标记：指针从 NULL 变成实际字体时重新应用一次。 */
 static void apply_zh_font(void)
 {
     static const lv_font_t *applied_font;
@@ -632,8 +665,14 @@ esp_err_t weather_clock_init(void)
             /* 旧版独立 IMU 标签迁移为系统首页，不再占用一级分页。 */
             media_mode = saved_mode == 2 || saved_mode == 3;
         }
+        /* 手动方向沿用上次选择；越界或未写入时保持跟随重力。 */
+        uint8_t saved_rotation = 0;
+        if (nvs_get_u8(storage, "rotation", &saved_rotation) == ESP_OK && saved_rotation <= 4) {
+            manual_rotation = saved_rotation;
+        }
         nvs_close(storage);
     }
+    printf("Display rotation: %s\n", rotation_names[manual_rotation]);
     network_events = xEventGroupCreate();
     if (!network_events) { return ESP_ERR_NO_MEM; }
     touch_commands = xQueueCreate(8, sizeof(const char *));
@@ -695,6 +734,7 @@ bool weather_clock_command(const char *command)
     int64_t now = esp_timer_get_time();
     bool handled = true;
     bool save_mode = false;
+    bool save_rotation = false;
     bool open_imu = false;
     bool enter_sleep = strcmp(command, "power sleep") == 0;
     lv_screen_load_anim_t transition = LV_SCREEN_LOAD_ANIM_NONE;
@@ -731,6 +771,24 @@ bool weather_clock_command(const char *command)
         ride_model_pause(&ride, now);
         previous_gnss_us = 0;
         printf("MPU6050 diagnostics; ride timer paused.\n");
+    } else if (strcmp(command, "rotation auto") == 0) {
+        /* 回到跟随重力；没有陀螺仪时 Auto 即竖屏，需要别的方向请直接选 0/90/180/270。 */
+        manual_rotation = 0;
+        save_rotation = true;
+        printf("Rotation: auto\n");
+    } else if (strncmp(command, "rotation ", 9) == 0) {
+        const char *degrees = command + 9;
+        unsigned selection = 0;
+        if (strcmp(degrees, "0") == 0) { selection = 1; }
+        else if (strcmp(degrees, "90") == 0) { selection = 2; }
+        else if (strcmp(degrees, "180") == 0) { selection = 3; }
+        else if (strcmp(degrees, "270") == 0) { selection = 4; }
+        if (selection == 0) { handled = false; }
+        else {
+            manual_rotation = selection;
+            save_rotation = true;
+            printf("Rotation: %s degrees\n", rotation_names[manual_rotation]);
+        }
     } else if (strcmp(command, "ride start") == 0) {
         if (ride_mode) {
             if (!ride.running) { previous_gnss_us = 0; }
@@ -753,21 +811,34 @@ bool weather_clock_command(const char *command)
     } else {
         handled = false;
     }
-    if (save_mode) {
+    if (save_mode || save_rotation) {
         nvs_handle_t storage;
         esp_err_t result = nvs_open("device_ui", NVS_READWRITE, &storage);
         if (result == ESP_OK) {
-            result = nvs_set_u8(storage, "mode", media_mode ? 2 : (ride_mode ? 1 : 0));
+            if (save_mode) {
+                result = nvs_set_u8(storage, "mode", media_mode ? 2 : (ride_mode ? 1 : 0));
+            }
+            if (result == ESP_OK && save_rotation) {
+                result = nvs_set_u8(storage, "rotation", (uint8_t)manual_rotation);
+            }
             if (result == ESP_OK) { result = nvs_commit(storage); }
             nvs_close(storage);
         }
-        if (result != ESP_OK) { printf("Mode not saved: %s\n", esp_err_to_name(result)); }
+        if (result != ESP_OK) { printf("Settings not saved: %s\n", esp_err_to_name(result)); }
     }
     if (handled && !enter_sleep && display && lvgl_port_lock(1000)) {
         /* 只有时钟页自动旋转；切出后立即回正，避免码表和诊断页短暂沿用横屏方向。 */
         if ((ride_mode || media_mode) && lv_display_get_rotation(display) != LV_DISPLAY_ROTATION_0) {
             lv_display_set_rotation(display, LV_DISPLAY_ROTATION_0);
             center_ui();
+        }
+        /* 手动方向当场生效：点一下按钮就转屏，不必等下一次 1 s 刷新。 */
+        if (!ride_mode && !media_mode && manual_rotation) {
+            lv_display_rotation_t selected = manual_rotation_value(manual_rotation);
+            if (lv_display_get_rotation(display) != selected) {
+                lv_display_set_rotation(display, selected);
+                center_ui();
+            }
         }
         if (transition != LV_SCREEN_LOAD_ANIM_NONE) {
             /* 保留三页对象供反向翻页复用，不让动画自动销毁旧页。 */
@@ -780,6 +851,7 @@ bool weather_clock_command(const char *command)
             else { entertainment_view_home(); }
         }
         touch_controls_update(selected_page(), ride.running);
+        touch_controls_set_rotation(manual_rotation);
         lvgl_port_unlock();
     }
     xSemaphoreGive(state_mutex);
@@ -861,13 +933,20 @@ void weather_clock_tick(bool online, bool time_valid)
     if (!lvgl_port_lock(100)) { xSemaphoreGive(state_mutex); return; }
     apply_zh_font();
     /* 姿态只改变摆件的显示方向，不自动改变 desk/ride 模式；码表保持安装方向。 */
+    bool rotation_allowed = !ride_mode && !media_mode && !boot_overlay;
     lv_display_rotation_t rotation = LV_DISPLAY_ROTATION_0;
-    if (HW_AUTO_ROTATE_ENABLED && !ride_mode && !media_mode && !boot_overlay && hardware.imu_valid && hardware.rotation_valid) {
+    if (rotation_allowed && manual_rotation) {
+        /* 手动方向优先于姿态：没有陀螺仪的板子也能固定横竖屏。 */
+        rotation = manual_rotation_value(manual_rotation);
+    } else if (rotation_allowed && HW_AUTO_ROTATE_ENABLED && hardware.imu_valid && hardware.rotation_valid) {
         if (hardware.rotation_degrees == 90) { rotation = LV_DISPLAY_ROTATION_90; }
         else if (hardware.rotation_degrees == 180) { rotation = LV_DISPLAY_ROTATION_180; }
         else if (hardware.rotation_degrees == 270) { rotation = LV_DISPLAY_ROTATION_270; }
-    } else if (!ride_mode && !media_mode && !boot_overlay) {
-        rotation = lv_display_get_rotation(display);
+    } else if (rotation_allowed) {
+        /* 有陀螺仪但暂时读不到稳定姿态（平放、抖动）时保持当前方向，避免来回翻转；
+           没有陀螺仪时 Auto 直接落到竖屏，让下拉面板的选择结果可预期。 */
+        rotation = (HW_AUTO_ROTATE_ENABLED && hardware.imu_valid) ?
+                   lv_display_get_rotation(display) : LV_DISPLAY_ROTATION_0;
     }
     if (lv_display_get_rotation(display) != rotation) {
         lv_display_set_rotation(display, rotation);
@@ -878,6 +957,7 @@ void weather_clock_tick(bool online, bool time_valid)
         lv_screen_load(selected_screen());
     }
     touch_controls_update(selected_page(), ride.running);
+    touch_controls_set_rotation(manual_rotation);
     if (ride_mode) {
         int64_t now = esp_timer_get_time();
         long long seconds = ride_model_elapsed(&ride, now) / 1000000;
@@ -939,7 +1019,7 @@ void weather_clock_tick(bool online, bool time_valid)
         strftime(text, sizeof(text), "%H:%M:%S", &local_time);
         /* 时分秒同一排、同大小。 */
         lv_label_set_text(time_label, text);
-        /* 日期与周几分行显示。 */
+        /* 日期与星期同一行，农历靠右收在同一行。 */
         snprintf(text, sizeof(text), "%04d-%02d-%02d",
                  local_time.tm_year + 1900, local_time.tm_mon + 1, local_time.tm_mday);
         lv_label_set_text(date_label, text);
@@ -951,16 +1031,17 @@ void weather_clock_tick(bool online, bool time_valid)
                      lunar_text, sizeof(lunar_text));
         lv_label_set_text(lunar_label, zh_font() ? lunar_text : "");
     } else {
-        /* 时间未同步时把提示放在农历行，日期与星期仍保持两列布局。 */
+        /* 时间未同步时日期与星期占位；提示改由卡片底部的状态行显示，
+         * 农历槽位只有 80 余像素，放不下“同步时间中...”这类句子。 */
         lv_label_set_text(date_label, "---- -- --");
         lv_label_set_text(weekday_label, "--");
-        lv_label_set_text(lunar_label, online
-            ? localize("同步时间中...", "Syncing time...")
-            : localize("请配置 WiFi", "Configure WiFi"));
+        lv_label_set_text(lunar_label, "");
         lv_label_set_text(time_label, "--:--:--");
     }
     bool stale = last_weather_update && esp_timer_get_time() - last_weather_update > 1800LL * 1000000;
     lv_label_set_text(weather_status_label,
+        !time_valid ? (online ? localize("同步时间中...", "Syncing time...")
+                              : localize("请配置 WiFi", "Configure WiFi")) :
         !online ? localize("离线 | 缓存天气", "Offline | cached weather") :
         weather_failed ? localize("天气获取失败 | 重试中", "Weather failed | retrying") :
         stale ? localize("天气数据过期 | Open-Meteo", "Weather stale | Open-Meteo") :

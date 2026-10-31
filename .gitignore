@@ -8,6 +8,8 @@
 *.elf
 *.map
 *.log
+# 中文字库随工程一起保存：构建时烧进 Flash 的 font 数据分区。
+!/main/fonts/ch16.bin
 
 # Machine-specific editor settings and credentials.
 /.vscode/

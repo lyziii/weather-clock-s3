@@ -14,6 +14,18 @@ static unsigned active_page = 3;
 static int gesture_start_y;
 static bool gestures_blocked;
 
+/* 下拉面板：一行方向键 + 一行电源键，横竖屏都居中显示。 */
+#define PANEL_WIDTH 224
+#define PANEL_HEIGHT 134
+/* 方向按钮 0 是跟随重力，1..4 依次固定 0/90/180/270 度；没有陀螺仪时靠它切横竖屏。 */
+#define ROTATION_COUNT 5
+static const char *const rotation_labels[ROTATION_COUNT] = {"Auto", "0°", "90°", "180°", "270°"};
+static const char *const rotation_commands[ROTATION_COUNT] = {
+    "rotation auto", "rotation 0", "rotation 90", "rotation 180", "rotation 270"};
+static lv_obj_t *rotation_buttons[ROTATION_COUNT];
+/* 初值取越界值，首次同步必定刷新一次高亮。 */
+static unsigned rotation_selection = ROTATION_COUNT;
+
 void touch_controls_set_blocked(bool blocked) { gestures_blocked = blocked; }
 
 static void slide_sleep_panel(void *object, int32_t y)
@@ -85,17 +97,28 @@ static void close_sleep_panel(lv_event_t *event)
     lv_obj_set_hidden(sleep_panel, true);
 }
 
+/* 方向键投递命令后收起面板：转屏结果立刻可见，再展开也能看到当前高亮。 */
+static void rotation_clicked(lv_event_t *event)
+{
+    const char *command = lv_event_get_user_data(event);
+    if (!submit_command(command)) {
+        ESP_LOGW("touch_ui", "Rotation queue busy");
+        return;
+    }
+    lv_obj_set_hidden(sleep_panel, true);
+}
+
 static void show_sleep_panel(void)
 {
     if (!lv_obj_is_hidden(sleep_panel)) { return; }
     lv_obj_set_hidden(sleep_panel, false);
     lv_obj_set_style_opa(sleep_panel, LV_OPA_COVER, 0);
-    lv_obj_set_y(sleep_panel, -112);
+    lv_obj_set_y(sleep_panel, -(PANEL_HEIGHT + 4));
     lv_anim_t animation;
     lv_anim_init(&animation);
     lv_anim_set_var(&animation, sleep_panel);
     lv_anim_set_exec_cb(&animation, slide_sleep_panel);
-    lv_anim_set_values(&animation, -112, 10);
+    lv_anim_set_values(&animation, -(PANEL_HEIGHT + 4), 10);
     lv_anim_set_duration(&animation, 220);
     lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
     lv_anim_start(&animation);
@@ -188,6 +211,8 @@ static void controls_deleted(lv_event_t *event)
     sleep_panel = NULL;
     control_display = NULL;
     active_page = 3;
+    for (unsigned index = 0; index < ROTATION_COUNT; ++index) { rotation_buttons[index] = NULL; }
+    rotation_selection = ROTATION_COUNT;
 }
 
 void touch_controls_create(lv_display_t *display, lv_obj_t *ride_page,
@@ -203,7 +228,7 @@ void touch_controls_create(lv_display_t *display, lv_obj_t *ride_page,
     lv_obj_add_event_cb(page_indicator, controls_deleted, LV_EVENT_DELETE, NULL);
     sleep_panel = lv_obj_create(lv_display_get_layer_top(display));
     lv_obj_remove_style_all(sleep_panel);
-    lv_obj_set_size(sleep_panel, 224, 108);
+    lv_obj_set_size(sleep_panel, PANEL_WIDTH, PANEL_HEIGHT);
     lv_obj_set_style_bg_color(sleep_panel, lv_color_hex(0x14231F), 0);
     lv_obj_set_style_bg_opa(sleep_panel, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(sleep_panel, 8, 0);
@@ -215,24 +240,31 @@ void touch_controls_create(lv_display_t *display, lv_obj_t *ride_page,
     lv_obj_set_scrollable(sleep_panel, false);
     lv_obj_align(sleep_panel, LV_ALIGN_TOP_MID, 0, 10);
     lv_obj_set_hidden(sleep_panel, true);
-    lv_obj_t *handle = make_shape(sleep_panel, 96, 7, 32, 3, 0x6C877D, 2);
+    lv_obj_t *handle = make_shape(sleep_panel, (PANEL_WIDTH - 32) / 2, 7, 32, 3, 0x6C877D, 2);
     lv_obj_set_clickable(handle, false);
     lv_obj_set_scrollable(handle, false);
-    lv_obj_t *title = make_label(sleep_panel, "POWER", 12, 20, 200,
+    lv_obj_t *title = make_label(sleep_panel, "CONTROL", 12, 18, PANEL_WIDTH - 24,
                                  &lv_font_montserrat_12, 0x8CE2BE);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    /* 方向按钮：Auto / 0° / 90° / 180° / 270°，当前项用 CHECKED 底色高亮。 */
+    for (unsigned index = 0; index < ROTATION_COUNT; ++index) {
+        rotation_buttons[index] = create_button(sleep_panel, rotation_labels[index],
+                                                rotation_clicked, rotation_commands[index]);
+        lv_obj_set_pos(rotation_buttons[index], 8 + (int)index * 42, 40);
+        lv_obj_set_size(rotation_buttons[index], 39, 30);
+    }
     lv_obj_t *sleep_button = create_button(sleep_panel, "Sleep", sleep_clicked, NULL);
     lv_obj_set_style_bg_color(sleep_button, lv_color_hex(0x8A433C), 0);
     lv_obj_set_style_bg_color(sleep_button, lv_color_hex(0xA85649), LV_STATE_PRESSED);
     lv_obj_set_style_radius(sleep_button, 6, 0);
-    lv_obj_set_pos(sleep_button, 10, 50);
-    lv_obj_set_size(sleep_button, 96, 48);
+    lv_obj_set_pos(sleep_button, 8, 78);
+    lv_obj_set_size(sleep_button, 100, 44);
     lv_obj_t *cancel_button = create_button(sleep_panel, "Cancel", close_sleep_panel, NULL);
     lv_obj_set_style_bg_color(cancel_button, lv_color_hex(0x30483E), 0);
     lv_obj_set_style_bg_color(cancel_button, lv_color_hex(0x46685A), LV_STATE_PRESSED);
     lv_obj_set_style_radius(cancel_button, 6, 0);
-    lv_obj_set_pos(cancel_button, 118, 50);
-    lv_obj_set_size(cancel_button, 96, 48);
+    lv_obj_set_pos(cancel_button, 116, 78);
+    lv_obj_set_size(cancel_button, 100, 44);
     for (unsigned index = 0; index < 3; ++index) {
         page_dots[index] = make_shape(page_indicator, 7 + index * 16, 3, 6, 6,
                                       0x527C6E, LV_RADIUS_CIRCLE);
@@ -255,6 +287,17 @@ void touch_controls_create(lv_display_t *display, lv_obj_t *ride_page,
             lv_indev_add_event_cb(input, page_gesture, LV_EVENT_PRESSED, input);
             break;
         }
+    }
+}
+
+/* 由持有 LVGL 锁的调用方同步：只有选择变化时才改按钮状态，避免每秒重复刷新。 */
+void touch_controls_set_rotation(unsigned selection)
+{
+    if (!rotation_buttons[0] || selection > 4 || selection == rotation_selection) { return; }
+    rotation_selection = selection;
+    for (unsigned index = 0; index < ROTATION_COUNT; ++index) {
+        if (index == selection) { lv_obj_add_state(rotation_buttons[index], LV_STATE_CHECKED); }
+        else { lv_obj_remove_state(rotation_buttons[index], LV_STATE_CHECKED); }
     }
 }
 

@@ -35,8 +35,8 @@ static esp_err_t probe_medium(sdmmc_card_t *card)
 esp_err_t usb_msc_start(void)
 {
     if (active) { return ESP_OK; }
-    /* 中文字库的字节已全部复制到 PSRAM，不持有 /tf 文件句柄，切换 U 盘
-     * 时无需销毁字体；只有文件浏览会暂时看不到本地卡。 */
+    /* 中文字库烧在 Flash 分区里，与 TF 卡和 U 盘模式都无关，切换时无需处理
+     * 字体；只有文件浏览会暂时看不到本地卡。 */
     sdmmc_card_t *card = tf_card_enter_usb();
     if (!card) {
         ESP_LOGE(TAG, "TF card unavailable for USB (no card or volume still busy)");
@@ -132,8 +132,8 @@ esp_err_t usb_msc_stop(void)
         ESP_LOGW(TAG, "MSC driver uninstall failed: %s", esp_err_to_name(err));
     }
     active = false;
-    /* 归还 SDMMC 主机并重新挂载 /tf，恢复本地文件浏览；中文字库常驻
-     * PSRAM，重新挂载后无需重新读取字库。 */
+    /* 归还 SDMMC 主机并重新挂载 /tf，恢复本地文件浏览；中文字库在 Flash
+     * 分区里，不受 U 盘模式影响。 */
     tf_card_exit_usb();
     ESP_LOGI(TAG, "USB MSC disabled: local TF mount restored, remove the disk from the PC first");
     return ESP_OK;

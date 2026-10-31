@@ -251,7 +251,7 @@ void app_main(void)
     }
     for (;;) {
         char command[40];
-        printf("Commands: mode desk, mode ride, mode imu, ride start, ride pause, ride reset, status, power, config, sync, music start, music stop, brightness 10-100\n");
+        printf("Commands: mode desk, mode ride, mode imu, rotation auto|0|90|180|270, ride start, ride pause, ride reset, status, power, config, sync, music start, music stop, brightness 10-100\n");
         if (!read_line(command, sizeof(command), false)) {
             printf("Command too long.\n");
         } else if (weather_clock_command(command)) {

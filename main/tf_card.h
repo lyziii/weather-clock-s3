@@ -35,13 +35,13 @@ esp_err_t tf_card_init(void);
 bool tf_card_snapshot(tf_snapshot_t *snapshot);
 bool tf_card_browse(const char *path, unsigned page);
 
-/* 串行化所有 TF 卡访问（目录浏览、字库读取、挂载/卸载）。
- * 字库等外部 VFS 使用者在每次文件操作前后调用；USB 切换会先取此锁，
- * 保证卸载时没有正在进行的目录或字库访问。 */
+/* 串行化所有 TF 卡访问（目录浏览、WAV 播放、挂载/卸载）。
+ * 外部 VFS 使用者在每次文件操作前后调用；USB 切换会先取此锁，
+ * 保证卸载时没有正在进行的目录或播放访问。 */
 void tf_card_lock(void);
 void tf_card_unlock(void);
 
-/* 标记一段“外部整体读取”开始/结束（字库整体载入、WAV 播放）。
+/* 标记一段“外部整体读取”开始/结束（WAV 播放）。
  * 期间卡状态探测不会卸载 /tf，USB 切换也会直接返回失败，避免正在读的
  * 文件被抽走；读取结束后下一轮探测仍会处理真正的拔卡。
  * 内部使用计数，可嵌套或由多个读者同时持有。 */
