@@ -27,17 +27,15 @@
 #include "entertainment_view.h"
 #include "zh_font.h"
 #include "lunar.h"
-#include "cyber_tools.h"
+#include "cyber_assets.h"
 
 #define NETWORK_READY BIT0
 #define TIME_READY BIT1
 
 static const char *TAG = "weather_clock";
-/* 天气图标统一使用 62x52 容器：云朵视觉高度约 31 px，
- * 容器内以 62x52 为基准排布，横竖屏共用同一套相对坐标。 */
-#define WEATHER_ICON_WIDTH 62
-#define WEATHER_ICON_HEIGHT 52
-#define WEATHER_ICON_CENTER_OFFSET 15
+/* 太空人沿用原始 70x70 十帧图像，横竖屏均占用温度右侧的固定槽位。 */
+#define WEATHER_ICON_WIDTH 70
+#define WEATHER_ICON_HEIGHT 70
 /* 温度文字与图标槽位之间的固定间距，横竖屏保持一致。 */
 #define WEATHER_ICON_GAP 10
 /* 中文星期，用于日期行，避免 strftime %a 输出英文缩写。 */
@@ -56,15 +54,7 @@ static lv_obj_t *temperature_label;
 static lv_obj_t *condition_label;
 static lv_obj_t *humidity_label;
 static lv_obj_t *weather_status_label;
-static lv_obj_t *sun_icon;
-static lv_obj_t *sun_disc;
-static lv_obj_t *cloud_icon;
-static lv_obj_t *rain_icon;
-static lv_obj_t *snow_icon;
-static lv_obj_t *storm_icon;
 static lv_obj_t *weather_icon_slot;
-static lv_obj_t *rain_drops_layer;
-static lv_obj_t *snow_flakes_layer;
 static lv_obj_t *weather_card;
 static lv_obj_t *ride_speed_band;
 static lv_obj_t *ride_unit_label;
@@ -75,6 +65,7 @@ static bool weather_failed;
 static SemaphoreHandle_t state_mutex;
 static bool ride_mode;
 static bool media_mode;
+static bool light_theme;
 /* 传感器不可用时，各页共用持久化的四向旋转状态，避免刷新或重启回正。 */
 static lv_display_rotation_t manual_rotation = LV_DISPLAY_ROTATION_0;
 static ride_model_t ride;
@@ -212,26 +203,32 @@ static void create_ride_ui(void)
                                    &lv_font_montserrat_12, 0xAAAAAA);
 }
 
-/* 图标由少量 LVGL 图元组成，不需要解码图片或分配整屏画布。 */
-/* 画一朵云（相对 parent 的局部坐标）。 */
-static void make_cloud_shape(lv_obj_t *parent, int x, int y)
+/* A8 动画只存线条透明度，切换配色不重启动画，也不产生独立背景块。 */
+static void apply_clock_theme(void)
 {
-    make_shape(parent, x + 1, y + 9, 27, 22, 0xDDE7E5, LV_RADIUS_CIRCLE);
-    make_shape(parent, x + 19, y, 31, 30, 0xDDE7E5, LV_RADIUS_CIRCLE);
-    make_shape(parent, x + 40, y + 12, 22, 19, 0xDDE7E5, LV_RADIUS_CIRCLE);
-    make_shape(parent, x + 14, y + 17, 40, 14, 0xDDE7E5, 2);
-}
-
-/* 创建无样式、不可滚动的图标容器；允许子图元溢出（太阳脉冲、雨滴/闪电）。 */
-static lv_obj_t *make_icon_container(lv_obj_t *parent, int x, int y, int width, int height)
-{
-    lv_obj_t *container = lv_obj_create(parent);
-    lv_obj_remove_style_all(container);
-    lv_obj_set_scrollable(container, false);
-    lv_obj_set_overflow_visible(container, true);
-    lv_obj_set_pos(container, x, y);
-    lv_obj_set_size(container, width, height);
-    return container;
+    static bool applied;
+    static bool applied_light;
+    if (applied && applied_light == light_theme) { return; }
+    lv_color_t background = lv_color_hex(light_theme ? 0xFFFFFF : 0x000000);
+    lv_color_t foreground = lv_color_hex(light_theme ? 0x000000 : 0xFFFFFF);
+    lv_color_t secondary = lv_color_hex(light_theme ? 0x555555 : 0xBBBBBB);
+    lv_obj_set_style_bg_color(desk_screen, background, 0);
+    lv_obj_set_style_bg_color(weather_card, background, 0);
+    lv_obj_t *primary_labels[] = {city_label, time_label, temperature_label, condition_label};
+    lv_obj_t *secondary_labels[] = {date_label, weekday_label, lunar_label, humidity_label, weather_status_label};
+    for (unsigned index = 0; index < sizeof(primary_labels) / sizeof(primary_labels[0]); ++index) {
+        lv_obj_set_style_text_color(primary_labels[index], foreground, 0);
+    }
+    for (unsigned index = 0; index < sizeof(secondary_labels) / sizeof(secondary_labels[0]); ++index) {
+        lv_obj_set_style_text_color(secondary_labels[index], secondary, 0);
+    }
+    lv_obj_set_style_bg_opa(weather_icon_slot, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_image_recolor(weather_icon_slot, foreground, 0);
+    lv_obj_set_style_image_recolor_opa(weather_icon_slot, LV_OPA_COVER, 0);
+    ui_status_bar_set_monochrome(&status_bars[0], foreground);
+    touch_controls_set_light_theme(light_theme);
+    applied_light = light_theme;
+    applied = true;
 }
 
 static void create_ui(void)
@@ -262,38 +259,15 @@ static void create_ui(void)
     lv_obj_set_style_text_align(humidity_label, LV_TEXT_ALIGN_CENTER, 0);
     weather_status_label = make_label(screen, "Open-Meteo | UTC+8", 14, 286, 212, &lv_font_montserrat_12, 0x8CA49B);
     lv_obj_set_style_text_align(weather_status_label, LV_TEXT_ALIGN_CENTER, 0);
-    /* 五种天气图标装在同一个固定槽位里；槽位位置只由 align_weather_icons() 决定，
-     * 动画只作用于槽位内部的图元，不再移动槽位，因此横竖屏都与温度保持同一相对位置。 */
-    weather_icon_slot = make_icon_container(screen, 0, 0, WEATHER_ICON_WIDTH, WEATHER_ICON_HEIGHT);
-    sun_icon = make_icon_container(weather_icon_slot, 0, 0, WEATHER_ICON_WIDTH, WEATHER_ICON_HEIGHT);
-    sun_disc = make_shape(sun_icon, 15, 0, 32, 32, 0xFFD166, LV_RADIUS_CIRCLE);
-    /* 云：多云/阴/雾。 */
-    cloud_icon = make_icon_container(weather_icon_slot, 0, 0, WEATHER_ICON_WIDTH, WEATHER_ICON_HEIGHT);
-    make_cloud_shape(cloud_icon, 0, 0);
-    /* 雨：云固定，只有雨滴子层下落。 */
-    rain_icon = make_icon_container(weather_icon_slot, 0, 0, WEATHER_ICON_WIDTH, WEATHER_ICON_HEIGHT);
-    make_cloud_shape(rain_icon, 0, 0);
-    rain_drops_layer = make_icon_container(rain_icon, 0, 0, WEATHER_ICON_WIDTH, WEATHER_ICON_HEIGHT);
-    for (int index = 0; index < 3; ++index) {
-        make_shape(rain_drops_layer, 12 + index * 15, 34, 4, 14, 0x73BEFF, 3);
-    }
-    /* 雪：云固定，只有雪花子层下落。 */
-    snow_icon = make_icon_container(weather_icon_slot, 0, 0, WEATHER_ICON_WIDTH, WEATHER_ICON_HEIGHT);
-    make_cloud_shape(snow_icon, 0, 0);
-    snow_flakes_layer = make_icon_container(snow_icon, 0, 0, WEATHER_ICON_WIDTH, WEATHER_ICON_HEIGHT);
-    for (int index = 0; index < 3; ++index) {
-        make_shape(snow_flakes_layer, 13 + index * 15, 38 + (index % 2) * 5, 5, 5,
-                   0xDDE7E5, LV_RADIUS_CIRCLE);
-    }
-    /* 雷：云固定，闪电只做透明度闪烁。 */
-    storm_icon = make_icon_container(weather_icon_slot, 0, 0, WEATHER_ICON_WIDTH, WEATHER_ICON_HEIGHT);
-    make_cloud_shape(storm_icon, 0, 0);
-    make_label(storm_icon, LV_SYMBOL_CHARGE, 19, 26, 24, &lv_font_montserrat_28, 0xFFD166);
-    lv_obj_set_hidden(sun_icon, true);
-    lv_obj_set_hidden(cloud_icon, true);
-    lv_obj_set_hidden(rain_icon, true);
-    lv_obj_set_hidden(snow_icon, true);
-    lv_obj_set_hidden(storm_icon, true);
+    /* 仅替换图标区域，时间、农历、天气数据及状态栏仍使用原天气钟面。 */
+    weather_icon_slot = lv_animimg_create(screen);
+    lv_obj_set_size(weather_icon_slot, WEATHER_ICON_WIDTH, WEATHER_ICON_HEIGHT);
+    lv_obj_set_clickable(weather_icon_slot, false);
+    lv_obj_set_scrollable(weather_icon_slot, false);
+    lv_animimg_set_src(weather_icon_slot, cyber_animation, 10);
+    lv_animimg_set_duration(weather_icon_slot, 300);
+    lv_animimg_set_repeat_count(weather_icon_slot, LV_ANIM_REPEAT_INFINITE);
+    lv_animimg_start(weather_icon_slot);
     ESP_LOGI(TAG, "LCD stage: weather page ready; creating ride page");
     create_ride_ui();
     ESP_LOGI(TAG, "LCD stage: ride page ready; creating system page");
@@ -301,6 +275,7 @@ static void create_ui(void)
     ui_status_bar_create(&status_bars[0], desk_screen, false);
     ui_status_bar_create(&status_bars[1], ride_screen, true);
     ui_status_bar_create(&status_bars[2], media_screen, true);
+    apply_clock_theme();
     /* 传感器异常留在诊断页显示，不覆盖用户保存的启动标签页。 */
     ESP_LOGI(TAG, "LCD stage: pages ready; loading initial screen");
     lv_screen_load(selected_screen());
@@ -309,11 +284,8 @@ static void create_ui(void)
 
 /* 页面用满显示区域；时钟页按“页头/日期行/大号时间/天气卡片/来源”分区，
  * 横屏时间占满整行，天气卡片横向铺开；码表指标由两列三行切换为三列两行。 */
-static void start_weather_anims(void);
-
 /* 温度与图标槽位同一行：槽位左边缘固定为“温度文字右边缘 + WEATHER_ICON_GAP”，
- * 竖直方向以温度文字的实际中心为准；横竖屏共用同一公式。
- * 五个图标都是槽位内 (0,0) 的同尺寸子对象，槽位本身不参与任何动画。 */
+ * 竖直方向以温度文字的实际中心为准；槽位只在布局时定位，不随帧切换移动。 */
 static void align_weather_icons(void)
 {
     if (!display || !temperature_label || !weather_icon_slot) { return; }
@@ -334,9 +306,18 @@ static void align_weather_icons(void)
     int32_t temperature_y = row_center - temperature_height / 2;
     int32_t icon_x = temperature_x + temperature_width + WEATHER_ICON_GAP;
     /* 由温度文字实际中心反推槽位 y，而不是再写死一个行中心。 */
-    int32_t icon_y = temperature_y + temperature_height / 2 - WEATHER_ICON_CENTER_OFFSET;
+    int32_t icon_y = temperature_y + temperature_height / 2 - WEATHER_ICON_HEIGHT / 2;
     lv_obj_set_pos(temperature_label, temperature_x, temperature_y);
     lv_obj_set_pos(weather_icon_slot, icon_x, icon_y);
+    /* 横屏为较宽的负温度留出空间，长天气文字单行滚动，不压住动画或湿度。 */
+    if (landscape) {
+        int32_t details_x = icon_x + WEATHER_ICON_WIDTH + WEATHER_ICON_GAP;
+        if (details_x < 202) { details_x = 202; }
+        place_label(condition_label, details_x, 144, width - details_x - 14);
+        place_label(humidity_label, details_x, 167, width - details_x - 14);
+    }
+    lv_label_set_long_mode(condition_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_long_mode(humidity_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
 }
 
 static void center_ui(void)
@@ -413,95 +394,6 @@ static void center_ui(void)
     }
     place_label(ride_state_label, 12, height - 76, width / 2 - 12);
     place_label(ride_sensor_label, width / 2 + 8, height - 76, width / 2 - 20);
-    start_weather_anims();
-    cyber_tools_resize();
-}
-
-/* 天气图标循环动画：太阳脉冲缩放、云呼吸、雨滴下落、雪花飘落、闪电闪烁。
- * 所有动画只作用于槽位内部的子图元；槽位与五个图标容器本身位置恒定。 */
-static int32_t sun_base_x;
-static int32_t sun_base_y;
-
-static void sun_pulse_cb(void *object, int32_t value)
-{
-    int32_t delta = value - 32;
-    lv_obj_set_size(object, value, value);
-    lv_obj_set_pos(object, sun_base_x - delta / 2, sun_base_y - delta / 2);
-}
-
-static void cloud_breath_cb(void *object, int32_t value) { lv_obj_set_style_opa(object, value, 0); }
-static void rain_fall_cb(void *object, int32_t value) { lv_obj_set_y(object, value); }
-static void snow_fall_cb(void *object, int32_t value) { lv_obj_set_y(object, value); }
-static void storm_flash_cb(void *object, int32_t value) { lv_obj_set_style_opa(object, value, 0); }
-
-static void start_weather_anims(void)
-{
-    /* 先停掉旧动画，避免横竖屏切换后动画叠加。 */
-    lv_anim_delete(sun_disc, sun_pulse_cb);
-    lv_anim_delete(cloud_icon, cloud_breath_cb);
-    lv_anim_delete(rain_drops_layer, rain_fall_cb);
-    lv_anim_delete(snow_flakes_layer, snow_fall_cb);
-    lv_anim_delete(storm_icon, storm_flash_cb);
-
-    /* 可见钟面已由 Cyber 工具接管，不再驱动隐藏的旧天气动画。 */
-    if (lv_obj_is_hidden(weather_card)) { return; }
-    lv_anim_t animation;
-
-    /* 脉冲前恢复 32 px 并按容器内基准定位，动画删除后不会留下放大状态。 */
-    lv_obj_set_size(sun_disc, 32, 32);
-    lv_obj_set_pos(sun_disc, 15, 0);
-    sun_base_x = 15;
-    sun_base_y = 0;
-    lv_anim_init(&animation);
-    lv_anim_set_var(&animation, sun_disc);
-    lv_anim_set_exec_cb(&animation, sun_pulse_cb);
-    lv_anim_set_values(&animation, 32, 38);
-    lv_anim_set_duration(&animation, 800);
-    lv_anim_set_reverse_duration(&animation, 800);
-    lv_anim_set_repeat_count(&animation, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_start(&animation);
-
-    /* 云只做透明度呼吸，不做水平漂移，避免图标离开温度右侧的固定槽位。 */
-    lv_obj_set_style_opa(cloud_icon, LV_OPA_COVER, 0);
-    lv_anim_init(&animation);
-    lv_anim_set_var(&animation, cloud_icon);
-    lv_anim_set_exec_cb(&animation, cloud_breath_cb);
-    lv_anim_set_values(&animation, LV_OPA_COVER, LV_OPA_60);
-    lv_anim_set_duration(&animation, 1500);
-    lv_anim_set_reverse_duration(&animation, 1500);
-    lv_anim_set_repeat_count(&animation, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_start(&animation);
-
-    /* 雨滴/雪花子层在 62x52 槽位内下落 4 px，回落幅度不会碰到天气描述。 */
-    lv_obj_set_y(rain_drops_layer, 0);
-    lv_anim_init(&animation);
-    lv_anim_set_var(&animation, rain_drops_layer);
-    lv_anim_set_exec_cb(&animation, rain_fall_cb);
-    lv_anim_set_values(&animation, 0, 4);
-    lv_anim_set_duration(&animation, 350);
-    lv_anim_set_reverse_duration(&animation, 350);
-    lv_anim_set_repeat_count(&animation, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_start(&animation);
-
-    lv_obj_set_y(snow_flakes_layer, 0);
-    lv_anim_init(&animation);
-    lv_anim_set_var(&animation, snow_flakes_layer);
-    lv_anim_set_exec_cb(&animation, snow_fall_cb);
-    lv_anim_set_values(&animation, 0, 4);
-    lv_anim_set_duration(&animation, 900);
-    lv_anim_set_reverse_duration(&animation, 900);
-    lv_anim_set_repeat_count(&animation, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_start(&animation);
-
-    lv_obj_set_style_opa(storm_icon, LV_OPA_COVER, 0);
-    lv_anim_init(&animation);
-    lv_anim_set_var(&animation, storm_icon);
-    lv_anim_set_exec_cb(&animation, storm_flash_cb);
-    lv_anim_set_values(&animation, LV_OPA_30, LV_OPA_COVER);
-    lv_anim_set_duration(&animation, 200);
-    lv_anim_set_reverse_duration(&animation, 200);
-    lv_anim_set_repeat_count(&animation, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_start(&animation);
 }
 
 static void create_display_ui(lv_display_t *created_display)
@@ -513,9 +405,9 @@ static void create_display_ui(lv_display_t *created_display)
     if (!hardware.imu_valid) { lv_display_set_rotation(display, manual_rotation); }
     zh_font_init();
     create_ui();
-    cyber_tools_create(desk_screen);
     center_ui();
     touch_controls_create(display, ride_screen, submit_touch_command);
+    touch_controls_set_light_theme(light_theme);
     touch_controls_update(selected_page(), ride.running);
     show_boot_animation();
 }
@@ -572,7 +464,6 @@ static void apply_zh_font(void)
 static void show_weather(const weather_data_t *weather, bool success)
 {
     if (!display || !lvgl_port_lock(1000)) { return; }
-    cyber_tools_weather(weather, success);
     weather_failed = !success;
     if (success) {
         last_weather_update = esp_timer_get_time();
@@ -583,27 +474,8 @@ static void show_weather(const weather_data_t *weather, bool success)
         lv_label_set_text(temperature_label, temperature_text);
         render_condition();
         render_humidity();
-        lv_obj_set_hidden(sun_icon, true);
-        lv_obj_set_hidden(cloud_icon, true);
-        lv_obj_set_hidden(rain_icon, true);
-        lv_obj_set_hidden(snow_icon, true);
-        lv_obj_set_hidden(storm_icon, true);
-        if (weather->code == 0) {
-            lv_obj_set_hidden(sun_icon, false);   /* 晴 */
-        } else if ((weather->code >= 71 && weather->code <= 77) ||
-                   weather->code == 85 || weather->code == 86) {
-            lv_obj_set_hidden(snow_icon, false);  /* 雪 */
-        } else if (weather->code >= 95) {
-            lv_obj_set_hidden(storm_icon, false); /* 雷雨 */
-        } else if ((weather->code >= 51 && weather->code <= 67) ||
-                   (weather->code >= 80 && weather->code <= 82)) {
-            lv_obj_set_hidden(rain_icon, false);  /* 雨/阵雨 */
-        } else {
-            lv_obj_set_hidden(cloud_icon, false); /* 大部晴朗/多云/阴/雾 */
-        }
-        /* 温度位数变化会改变文字宽度，重新贴靠图标槽位并重置内部动画。 */
+        /* 只调整槽位位置；天气刷新不能重新启动或打断太空人动画。 */
         align_weather_icons();
-        start_weather_anims();
     }
     lvgl_port_unlock();
 }
@@ -638,11 +510,20 @@ esp_err_t weather_clock_init(void)
     if (!state_mutex) { return ESP_ERR_NO_MEM; }
     nvs_handle_t storage;
     if (nvs_open("device_ui", NVS_READONLY, &storage) == ESP_OK) {
-        /* 桌面时钟固件统一以太空人钟面启动，仍保留手动旋转设置。 */
+        uint8_t saved_mode = 0;
+        if (nvs_get_u8(storage, "mode", &saved_mode) == ESP_OK) {
+            ride_mode = saved_mode == 1;
+            /* 兼容旧版 IMU 标签，恢复原来的启动页记忆。 */
+            media_mode = saved_mode == 2 || saved_mode == 3;
+        }
         uint8_t saved_rotation = 0;
         if (nvs_get_u8(storage, "rotation", &saved_rotation) == ESP_OK &&
             saved_rotation <= LV_DISPLAY_ROTATION_270) {
             manual_rotation = (lv_display_rotation_t)saved_rotation;
+        }
+        uint8_t saved_theme = 0;
+        if (nvs_get_u8(storage, "light", &saved_theme) == ESP_OK && saved_theme <= 1) {
+            light_theme = saved_theme == 1;
         }
         nvs_close(storage);
     }
@@ -709,21 +590,11 @@ bool weather_clock_command(const char *command)
     bool save_mode = false;
     bool open_imu = false;
     bool rotate_display = false;
+    lv_display_rotation_t requested_rotation = (lv_display_rotation_t)((manual_rotation + 1) % 4);
     bool save_rotation = false;
+    bool save_theme = false;
     bool enter_sleep = strcmp(command, "power sleep") == 0;
     lv_screen_load_anim_t transition = LV_SCREEN_LOAD_ANIM_NONE;
-    if (enter_sleep && display) {
-        bool allowed = false;
-        if (lvgl_port_lock(1000)) {
-            allowed = cyber_tools_allow_sleep();
-            lvgl_port_unlock();
-        }
-        if (!allowed) {
-            printf("Sleep blocked: disable alarms, stop timers and wait for AI requests.\n");
-            xSemaphoreGive(state_mutex);
-            return true;
-        }
-    }
     if (enter_sleep) {
         printf("Entering touch-wake sleep. Tap the screen three times to wake.\n");
     } else if (strcmp(command, "page next") == 0 || strcmp(command, "page prev") == 0) {
@@ -759,6 +630,19 @@ bool weather_clock_command(const char *command)
         printf("MPU6050 diagnostics; ride timer paused.\n");
     } else if (strcmp(command, "display rotate") == 0) {
         rotate_display = true;
+    } else if (strncmp(command, "display rotate ", 15) == 0) {
+        char *end = NULL;
+        unsigned long degrees = strtoul(command + 15, &end, 10);
+        /* 只接受四个正交方向，非法角度不能写入 NVS 或改变显示。 */
+        if (end == command + 15 || *end != '\0' || degrees > 270 || degrees % 90 != 0) {
+            handled = false;
+        } else {
+            requested_rotation = (lv_display_rotation_t)(degrees / 90);
+            rotate_display = true;
+        }
+    } else if (strcmp(command, "clock theme light") == 0 || strcmp(command, "clock theme dark") == 0) {
+        light_theme = strcmp(command, "clock theme light") == 0;
+        save_theme = true;
     } else if (strcmp(command, "ride start") == 0) {
         if (ride_mode) {
             if (!ride.running) { previous_gnss_us = 0; }
@@ -792,19 +676,15 @@ bool weather_clock_command(const char *command)
         if (result != ESP_OK) { printf("Mode not saved: %s\n", esp_err_to_name(result)); }
     }
     if (handled && !enter_sleep && display && lvgl_port_lock(1000)) {
+        apply_clock_theme();
         board_hardware_snapshot_t hardware = {0};
         board_hardware_snapshot(&hardware);
-        touch_controls_set_manual_rotation(!hardware.imu_valid);
         /* 再次核对读数，避免按钮点击排队期间传感器恢复后仍覆盖自动朝向。 */
         if (rotate_display && !hardware.imu_valid) {
-            switch (manual_rotation) {
-            case LV_DISPLAY_ROTATION_0: manual_rotation = LV_DISPLAY_ROTATION_90; break;
-            case LV_DISPLAY_ROTATION_90: manual_rotation = LV_DISPLAY_ROTATION_180; break;
-            case LV_DISPLAY_ROTATION_180: manual_rotation = LV_DISPLAY_ROTATION_270; break;
-            default: manual_rotation = LV_DISPLAY_ROTATION_0; break;
-            }
-            save_rotation = true;
+            save_rotation = manual_rotation != requested_rotation;
+            manual_rotation = requested_rotation;
         }
+        touch_controls_set_manual_rotation(!hardware.imu_valid, manual_rotation);
         lv_display_rotation_t rotation = !hardware.imu_valid ? manual_rotation :
             ((ride_mode || media_mode) ? LV_DISPLAY_ROTATION_0 : lv_display_get_rotation(display));
         if (lv_display_get_rotation(display) != rotation) {
@@ -825,6 +705,16 @@ bool weather_clock_command(const char *command)
         lvgl_port_unlock();
     }
     /* Flash 提交不占用界面锁；状态锁保证连续点击按顺序保存。 */
+    if (save_theme) {
+        nvs_handle_t storage;
+        esp_err_t result = nvs_open("device_ui", NVS_READWRITE, &storage);
+        if (result == ESP_OK) {
+            result = nvs_set_u8(storage, "light", light_theme ? 1 : 0);
+            if (result == ESP_OK) { result = nvs_commit(storage); }
+            nvs_close(storage);
+        }
+        if (result != ESP_OK) { ESP_LOGW(TAG, "Theme not saved: %s", esp_err_to_name(result)); }
+    }
     if (save_rotation) {
         nvs_handle_t storage;
         esp_err_t result = nvs_open("device_ui", NVS_READWRITE, &storage);
@@ -913,8 +803,7 @@ void weather_clock_tick(bool online, bool time_valid)
     if (!display) { xSemaphoreGive(state_mutex); return; }
     if (!lvgl_port_lock(100)) { xSemaphoreGive(state_mutex); return; }
     apply_zh_font();
-    cyber_tools_tick(online, time_valid);
-    touch_controls_set_manual_rotation(!hardware.imu_valid);
+    touch_controls_set_manual_rotation(!hardware.imu_valid, manual_rotation);
     /* 无传感器时各页沿用手动方向；恢复读数后仅时钟页自动旋转。 */
     lv_display_rotation_t rotation = boot_overlay ? lv_display_get_rotation(display) : LV_DISPLAY_ROTATION_0;
     if (!boot_overlay && !hardware.imu_valid) {
@@ -986,6 +875,7 @@ void weather_clock_tick(bool online, bool time_valid)
     device_status.gps_fixed = hardware.gnss_valid;
     device_status.tf_ready = entertainment_view_card_ready();
     for (unsigned index = 0; index < 3; ++index) {
+        if (index == 0) { apply_clock_theme(); }
         ui_status_bar_update(&status_bars[index], &device_status);
     }
     if (time_valid) {

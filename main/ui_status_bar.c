@@ -16,6 +16,7 @@ static lv_obj_t *create_icon(lv_obj_t *parent, const char *symbol, int left, int
 void ui_status_bar_create(ui_status_bar_t *bar, lv_obj_t *parent, bool show_gps)
 {
     bar->show_gps = show_gps;
+    bar->monochrome = false;
     bar->tf = create_icon(parent, LV_SYMBOL_SD_CARD, 110, 14);
     bar->gps = create_icon(parent, LV_SYMBOL_GPS, 126, 16);
     bar->bluetooth = create_icon(parent, LV_SYMBOL_BLUETOOTH, 144, 16);
@@ -34,7 +35,8 @@ void ui_status_bar_update(ui_status_bar_t *bar, const ui_status_t *status)
     /* 未接电量来源时明确显示未知，不能将默认零值伪装为真实低电量。 */
     if (!status->battery_valid) {
         lv_label_set_text(bar->battery, LV_SYMBOL_BATTERY_EMPTY " ?");
-        lv_obj_set_style_text_color(bar->battery, lv_color_hex(0x8CA49B), 0);
+        lv_obj_set_style_text_color(bar->battery,
+            bar->monochrome ? bar->foreground : lv_color_hex(0x8CA49B), 0);
         return;
     }
     unsigned percent = status->battery_percent > 100 ? 100 : status->battery_percent;
@@ -45,5 +47,16 @@ void ui_status_bar_update(ui_status_bar_t *bar, const ui_status_t *status)
     snprintf(text, sizeof(text), "%s %u%%", symbol, percent);
     lv_label_set_text(bar->battery, text);
     lv_obj_set_style_text_color(bar->battery,
+        bar->monochrome ? bar->foreground :
         lv_color_hex(percent <= 15 && !status->battery_charging ? 0xFFB86B : 0x8CE2BE), 0);
+}
+
+void ui_status_bar_set_monochrome(ui_status_bar_t *bar, lv_color_t foreground)
+{
+    bar->monochrome = true;
+    bar->foreground = foreground;
+    lv_obj_t *icons[] = {bar->tf, bar->gps, bar->bluetooth, bar->wifi, bar->battery};
+    for (unsigned index = 0; index < sizeof(icons) / sizeof(icons[0]); ++index) {
+        lv_obj_set_style_text_color(icons[index], foreground, 0);
+    }
 }

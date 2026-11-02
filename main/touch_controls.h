@@ -11,5 +11,7 @@ void touch_controls_create(lv_display_t *display, lv_obj_t *ride_page,
 						   bool (*submit)(const char *command));
 void touch_controls_update(unsigned page, bool running);
 
-/* 无有效姿态读数时显示手动翻转入口；调用方须持有 LVGL 锁。 */
-void touch_controls_set_manual_rotation(bool available);
+/* 无有效姿态读数时显示四档方向选择，并高亮已应用方向；须持有 LVGL 锁。 */
+void touch_controls_set_manual_rotation(bool available, lv_display_rotation_t rotation);
+/* 开关状态由命令任务确认；设置状态不会再次触发用户事件。 */
+void touch_controls_set_light_theme(bool light);

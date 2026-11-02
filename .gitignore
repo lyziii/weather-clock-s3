@@ -1,6 +1,7 @@
 # Generated ESP-IDF outputs and downloaded dependencies.
 /build/
 /managed_components/
+/tools/node_modules/
 /sdkconfig
 /sdkconfig.old
 /sdkconfig.backup

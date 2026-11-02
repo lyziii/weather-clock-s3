@@ -21,8 +21,12 @@ typedef struct {
     lv_obj_t *tf;
     lv_obj_t *battery;
     bool show_gps;
+    bool monochrome;
+    lv_color_t foreground;
 } ui_status_bar_t;
 
 /* 创建和更新必须在 LVGL 锁内调用，所有坐标相对页面的 240 像素内容区。 */
 void ui_status_bar_create(ui_status_bar_t *bar, lv_obj_t *parent, bool show_gps);
 void ui_status_bar_update(ui_status_bar_t *bar, const ui_status_t *status);
+/* 单色主题由更新逻辑保留，避免周期刷新恢复彩色电量文字。 */
+void ui_status_bar_set_monochrome(ui_status_bar_t *bar, lv_color_t foreground);

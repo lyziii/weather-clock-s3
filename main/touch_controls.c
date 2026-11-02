@@ -2,7 +2,6 @@
 #include "esp_log.h"
 #include "ui_helpers.h"
 #include "entertainment_view.h"
-#include "cyber_tools.h"
 
 static lv_display_t *control_display;
 static bool (*submit_command)(const char *command);
@@ -11,7 +10,9 @@ static lv_obj_t *page_dots[3];
 static lv_obj_t *ride_buttons[3];
 static lv_obj_t *reset_overlay;
 static lv_obj_t *sleep_panel;
-static lv_obj_t *rotate_button;
+static lv_obj_t *rotation_controls;
+static lv_obj_t *rotation_buttons[4];
+static lv_obj_t *theme_switch;
 static unsigned active_page = 3;
 static int gesture_start_y;
 static bool gestures_blocked;
@@ -81,6 +82,15 @@ static void sleep_clicked(lv_event_t *event)
     lv_obj_set_hidden(sleep_panel, true);
 }
 
+static void theme_changed(lv_event_t *event)
+{
+    bool light = lv_obj_has_state(lv_event_get_target_obj(event), LV_STATE_CHECKED);
+    if (!submit_command(light ? "clock theme light" : "clock theme dark")) {
+        touch_controls_set_light_theme(!light);
+        ESP_LOGW("touch_ui", "Theme command queue busy");
+    }
+}
+
 static void close_sleep_panel(lv_event_t *event)
 {
     (void)event;
@@ -117,7 +127,7 @@ static void page_gesture(lv_event_t *event)
     }
     lv_dir_t direction = lv_indev_get_gesture_dir(input);
     /* 系统内容区纵滑留给列表，只有从标题栏开始下拉才打开电源面板。 */
-    if ((active_page == 1 || (active_page == 0 && cyber_tools_is_child())) &&
+    if (active_page == 1 &&
         lv_obj_is_hidden(sleep_panel) && gesture_start_y >= 32 &&
         (direction == LV_DIR_BOTTOM || direction == LV_DIR_TOP)) { return; }
     if (direction == LV_DIR_BOTTOM) {
@@ -132,12 +142,6 @@ static void page_gesture(lv_event_t *event)
     }
     if (!lv_obj_is_hidden(sleep_panel)) { return; }
     /* 系统二级页左滑返回首页，禁止横滑误切到其他一级页。 */
-    if (active_page == 0 && cyber_tools_is_child() &&
-        (direction == LV_DIR_LEFT || direction == LV_DIR_RIGHT)) {
-        if (direction == LV_DIR_LEFT) { cyber_tools_home(); }
-        lv_indev_wait_release(input);
-        return;
-    }
     if (active_page == 1 && entertainment_view_is_child() &&
         (direction == LV_DIR_LEFT || direction == LV_DIR_RIGHT)) {
         if (direction == LV_DIR_LEFT) { entertainment_view_home(); }
@@ -196,7 +200,8 @@ static void controls_deleted(lv_event_t *event)
     lv_anim_delete(sleep_panel, slide_sleep_panel);
     page_indicator = NULL;
     sleep_panel = NULL;
-    rotate_button = NULL;
+    rotation_controls = NULL;
+    theme_switch = NULL;
     control_display = NULL;
     active_page = 3;
 }
@@ -214,7 +219,7 @@ void touch_controls_create(lv_display_t *display, lv_obj_t *ride_page,
     lv_obj_add_event_cb(page_indicator, controls_deleted, LV_EVENT_DELETE, NULL);
     sleep_panel = lv_obj_create(lv_display_get_layer_top(display));
     lv_obj_remove_style_all(sleep_panel);
-    lv_obj_set_size(sleep_panel, 224, 108);
+    lv_obj_set_size(sleep_panel, 224, 152);
     lv_obj_set_style_bg_color(sleep_panel, lv_color_hex(0x14231F), 0);
     lv_obj_set_style_bg_opa(sleep_panel, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(sleep_panel, 8, 0);
@@ -244,10 +249,30 @@ void touch_controls_create(lv_display_t *display, lv_obj_t *ride_page,
     lv_obj_set_style_radius(cancel_button, 6, 0);
     lv_obj_set_pos(cancel_button, 118, 50);
     lv_obj_set_size(cancel_button, 96, 48);
-    rotate_button = create_button(sleep_panel, LV_SYMBOL_REFRESH " Rotate 90", command_clicked, "display rotate");
-    lv_obj_set_pos(rotate_button, 10, 106);
-    lv_obj_set_size(rotate_button, 204, 42);
-    lv_obj_set_hidden(rotate_button, true);
+    /* 四档共用固定一行，状态由命令任务确认后更新，避免排队失败时误高亮。 */
+    rotation_controls = lv_obj_create(sleep_panel);
+    lv_obj_remove_style_all(rotation_controls);
+    lv_obj_set_pos(rotation_controls, 10, 150);
+    lv_obj_set_size(rotation_controls, 204, 42);
+    lv_obj_set_scrollable(rotation_controls, false);
+    lv_obj_set_hidden(rotation_controls, true);
+    const char *rotation_labels[] = {"0°", "90°", "180°", "270°"};
+    const char *rotation_commands[] = {
+        "display rotate 0", "display rotate 90", "display rotate 180", "display rotate 270"
+    };
+    for (unsigned index = 0; index < 4; ++index) {
+        rotation_buttons[index] = create_button(rotation_controls, rotation_labels[index],
+                                                command_clicked, rotation_commands[index]);
+        lv_obj_set_pos(rotation_buttons[index], index * 52, 0);
+        lv_obj_set_size(rotation_buttons[index], 48, 42);
+    }
+    make_label(sleep_panel, "White", 12, 114, 140, &lv_font_montserrat_12, 0xFFFFFF);
+    theme_switch = lv_switch_create(sleep_panel);
+    lv_obj_set_pos(theme_switch, 166, 110);
+    lv_obj_set_size(theme_switch, 40, 24);
+    lv_obj_set_style_bg_color(theme_switch, lv_color_hex(0xFFFFFF), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(theme_switch, lv_color_hex(0x333333), LV_PART_KNOB);
+    lv_obj_add_event_cb(theme_switch, theme_changed, LV_EVENT_VALUE_CHANGED, NULL);
     for (unsigned index = 0; index < 3; ++index) {
         page_dots[index] = make_shape(page_indicator, 7 + index * 16, 3, 6, 6,
                                       0x527C6E, LV_RADIUS_CIRCLE);
@@ -273,12 +298,23 @@ void touch_controls_create(lv_display_t *display, lv_obj_t *ride_page,
     }
 }
 
-void touch_controls_set_manual_rotation(bool available)
+void touch_controls_set_manual_rotation(bool available, lv_display_rotation_t rotation)
 {
-    if (!rotate_button) { return; }
-    /* 保留原有睡眠按钮布局，只在传感器不可用时增加一行。 */
-    lv_obj_set_hidden(rotate_button, !available);
-    lv_obj_set_height(sleep_panel, available ? 158 : 108);
+    if (!rotation_controls) { return; }
+    /* 开关常驻；附加旋转行后仍能完整放入 240 像素横屏。 */
+    lv_obj_set_hidden(rotation_controls, !available);
+    lv_obj_set_height(sleep_panel, available ? 202 : 152);
+    for (unsigned index = 0; index < 4; ++index) {
+        if (index == (unsigned)rotation) { lv_obj_add_state(rotation_buttons[index], LV_STATE_CHECKED); }
+        else { lv_obj_remove_state(rotation_buttons[index], LV_STATE_CHECKED); }
+    }
+}
+
+void touch_controls_set_light_theme(bool light)
+{
+    if (!theme_switch) { return; }
+    if (light) { lv_obj_add_state(theme_switch, LV_STATE_CHECKED); }
+    else { lv_obj_remove_state(theme_switch, LV_STATE_CHECKED); }
 }
 
 void touch_controls_update(unsigned page, bool running)
